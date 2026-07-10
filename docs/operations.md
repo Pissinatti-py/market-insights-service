@@ -7,12 +7,13 @@ without it.
 
 ```bash
 cp .env.example .env        # set GITHUB_TOKEN; point OLLAMA_BASE_URL at your daemon
-uv lock                     # generate uv.lock once (committed thereafter)  →  make lock
-docker compose up --build   # api :8003, postgres, redis, worker, beat      →  make up
+docker compose up --build   # api :8003, postgres, redis, celery (worker+beat)  →  make up
 ```
 
 The `api` container runs migrations on boot (`scripts/docker-entrypoint.sh` →
-`alembic upgrade head`) before starting uvicorn. Swagger: <http://localhost:8003/docs>.
+`alembic upgrade head`) before starting uvicorn. Review UI:
+<http://localhost:8003/> · Swagger: <http://localhost:8003/docs>.
+(`uv.lock` is committed — no pre-step needed.)
 
 > **Gotcha:** compose mounts `.:/app`, which overlays the host directory on top of
 > the image — so `scripts/*.sh` must be executable **on the host** or the
@@ -29,11 +30,11 @@ uv run uvicorn src.main:app --reload --port 8003
 ```
 
 Needs a reachable Postgres + Redis; override `DATABASE_URL`, `REDIS_URL`,
-`CELERY_*` in `.env`. Run the worker/beat yourself if you want the collectors:
+`CELERY_*` in `.env`. Run the worker (with embedded beat) yourself if you want
+the collectors:
 
 ```bash
-uv run celery -A src.core.celery.celery_app worker --loglevel=info -Q celery
-uv run celery -A src.core.celery.celery_app beat  --loglevel=info --scheduler redbeat.RedBeatScheduler
+uv run celery -A src.core.celery.celery_app worker -B --loglevel=info -Q celery --scheduler redbeat.RedBeatScheduler
 ```
 
 ## Trigger a task by hand
@@ -52,9 +53,10 @@ Check the outcome afterwards in `curl -s localhost:8003/status` (`tasks` map).
 Task names: `src.tasks.github_tasks.collect_trending`,
 `src.tasks.packages_tasks.collect_releases`,
 `src.tasks.articles_tasks.collect_articles`,
-`src.tasks.curation_tasks.curate_uncurated`.
+`src.tasks.curation_tasks.curate_uncurated`,
+`src.tasks.curation_tasks.recurate_all`.
 
-Watch the worker: `docker compose logs -f celery_worker`.
+Watch the worker: `docker compose logs -f celery`.
 
 ## Migrations (Alembic)
 
@@ -87,5 +89,5 @@ make format      # ruff check --fix + ruff format
 ```bash
 curl -s localhost:8003/health    # process up
 curl -s localhost:8003/status    # DB reachable?  {"status":"ok","database":true}
-docker compose ps                # all five containers Up / healthy
+docker compose ps                # all four containers Up / healthy
 ```

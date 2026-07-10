@@ -2,13 +2,12 @@
 
 ## Processes
 
-The stack (`docker-compose.yml`) is five containers:
+The stack (`docker-compose.yml`) is four containers:
 
 | Container | Image / build | Role |
 |---|---|---|
-| `market_insights_api` | `Dockerfile` | FastAPI (uvicorn `:8003`). Serves the REST API and applies Alembic migrations on boot (`scripts/docker-entrypoint.sh`). |
-| `market_insights_celery_worker` | `Dockerfile.celery` | Runs the collectors + curation task on the `celery` queue. |
-| `market_insights_celery_beat` | `Dockerfile.celery` | RedBeat scheduler — enqueues the periodic tasks. |
+| `market_insights_api` | `Dockerfile` | FastAPI (uvicorn `:8003`). Serves the REST API, the review UI at `/`, and applies Alembic migrations on boot (`scripts/docker-entrypoint.sh`). |
+| `market_insights_celery` | `Dockerfile` | Worker + embedded RedBeat beat (`worker -B`) — collectors, curation, and the periodic schedule in one dev container. Split beat back out before scaling to multiple workers. |
 | `market_insights_db` | `postgres:16-alpine` | This service owns its own Postgres (host port `5434`). |
 | `market_insights_redis` | `redis:7-alpine` | Celery broker + result backend **and** the RedBeat schedule store. |
 
@@ -20,12 +19,13 @@ The API and worker containers can talk to it; the DB/redis don't need to.
 
 ```
 src/
-  main.py                 FastAPI app factory (CORS, router mount)
+  main.py                 FastAPI app factory (CORS, router mount, review UI at /)
+  static/index.html       the review UI — one self-contained page over the API
   api/                    HTTP layer — one router per domain, thin
     router.py               mounts domain routers under API_PREFIX (/api)
     health_router.py        /health, /status  (no prefix — for probes)
     repositories_router.py  libraries_router.py  articles_router.py
-    curation_router.py      config_router.py
+    curation_router.py      feed_router.py  config_router.py  tasks_router.py
   schemas/                Pydantic request/response models (the API contract)
   db/
     session.py              async engine (API) + SyncSession (Celery)
@@ -37,6 +37,8 @@ src/
   services/
     collectors/             external fetchers: github, packages, articles
     agents/curation_agent.py the ONLY place the LLM prompt + Ollama call live
+    agents/enrichment.py     pre-LLM evidence: full article body via tools/article_reader
+    tools/article_reader.py  trafilatura fetch+extract, truncated to ARTICLE_MAX_CHARS
   core/
     conf.py                 pydantic-settings (env)
     celery/                 celery_app + beat schedules
@@ -80,11 +82,14 @@ at the same Postgres; the models are shared.
    and bails early if that source is toggled off in `enabled_sources`.
 3. It calls the matching `services/collectors/*` fetcher, then `bulk_upsert_dedup`
    writes new rows keyed by `dedup_key`. Existing rows are left untouched.
-4. Nightly, **curate_uncurated** finds items with no curation row, renders each to
-   text, and asks the LLM (via `curation_agent.curate`) for a summary/tags/score.
-   Valid output becomes a `pending` `mi__curation` row.
-5. **Clients** read everything through the API; a **reviewer** approves/rejects
-   each curation, and edits the profile/toggles that steer future runs.
+   **Any insert immediately chains `curate_uncurated`.**
+4. **curate_uncurated** (chained + daily 02:00 sweep) finds items with no curation
+   row round-robin across types, enriches articles with their full body, and asks
+   the LLM (via `curation_agent.curate`) for a summary/tags/score. Valid output
+   becomes a `pending` `mi__curation` row; invalid output dead-letters as `failed`.
+5. **Clients** read the ranked feed (`GET /api/feed`, default pending+approved) or
+   the review UI at `/`; a **reviewer** approves/rejects each curation and edits
+   the profile/toggles that steer future runs.
 
 Details of each step — including idempotency and error handling — are in
 [flows.md](flows.md).

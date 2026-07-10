@@ -1,16 +1,33 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, computed_field
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+
+# The only collectors that exist — a typo'd key would otherwise silently no-op.
+_VALID_SOURCES = {"github", "packages", "articles"}
+
+
+def _check_source_keys(v: dict | None) -> dict | None:
+    if v is not None:
+        unknown = set(v) - _VALID_SOURCES
+        if unknown:
+            raise ValueError(f"unknown source(s) {sorted(unknown)}; valid: {sorted(_VALID_SOURCES)}")
+    return v
 
 
 class PreferenceUpdate(BaseModel):
     """Partial update of the singleton preferences row."""
 
-    stacks: list[str] | None = None
-    areas: list[str] | None = None
-    keywords: list[str] | None = None
-    monitored_libraries: list[str] | None = None
-    enabled_sources: dict | None = None
+    stacks: list[str] | None = Field(None, description="Languages/stacks — filter GitHub trending (language:x)")
+    areas: list[str] | None = Field(None, description="Topic areas — Dev.to/HN/Medium article tags")
+    keywords: list[str] | None = Field(
+        None, description="Search terms — GitHub search + relevance scoring, and article tags"
+    )
+    monitored_libraries: list[str] | None = Field(
+        None, description='"ecosystem:name" entries (pypi/npm) polled for new releases, e.g. "pypi:fastapi"'
+    )
+    enabled_sources: dict | None = Field(None, description="Per-collector on/off: {github|packages|articles: bool}")
+
+    _sources_known = field_validator("enabled_sources")(_check_source_keys)
 
 
 class PreferenceRead(BaseModel):
@@ -33,4 +50,6 @@ class PreferenceRead(BaseModel):
 class SourcesConfig(BaseModel):
     """Configure which collectors are enabled (``POST /api/config/sources``)."""
 
-    enabled_sources: dict
+    enabled_sources: dict = Field(description="Per-collector on/off: {github|packages|articles: bool}")
+
+    _sources_known = field_validator("enabled_sources")(_check_source_keys)

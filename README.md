@@ -16,22 +16,29 @@ Docker image) so it can later drop into that network unchanged.
 |---|---|---|
 | `collect_trending` | GitHub Search API | every 6h |
 | `collect_releases` | PyPI + npm registries | daily 12:00 |
-| `collect_articles` | Dev.to API + Hacker News (Algolia) + Medium/blog RSS | every 12h |
-| `curate_uncurated` | Ollama LLM curation | daily 02:00 |
+| `collect_articles` | Dev.to API + Hacker News (Algolia) + Medium tag RSS | every 12h |
+| `curate_uncurated` | Ollama LLM curation | chained after each collection + daily 02:00 sweep |
 
 Every collected row carries a unique `dedup_key`; collectors upsert with
 `INSERT … ON CONFLICT DO NOTHING`, so re-runs are idempotent. Curation is also
 idempotent — an item is curated at most once (`(item_type, item_id)` unique).
+Articles additionally pass an age gate (`ARTICLE_MAX_AGE_DAYS`) and a
+title-fingerprint collapse, so old news and cross-source duplicates never enter
+the pipeline.
+
+Consume the result at **`GET /`** (single-page review UI: ranked feed, filters,
+approve/reject) or **`GET /api/feed`** (same data over JSON, default
+pending + approved).
 
 ## Quick start (Docker)
 
 ```bash
 cp .env.example .env        # set GITHUB_TOKEN; point OLLAMA_BASE_URL at your daemon
-uv lock                     # generate uv.lock once (committed thereafter)
-docker compose up --build   # api :8003, postgres, redis, celery worker + beat
+docker compose up --build   # api :8003, postgres, redis, celery (worker + embedded beat)
 ```
 
-The API container migrates on boot. Open Swagger at http://localhost:8003/docs.
+The API container migrates on boot. Review UI at http://localhost:8003/ —
+Swagger at http://localhost:8003/docs.
 
 Fire a collector by hand — over HTTP (no shell into the container needed):
 
@@ -74,11 +81,13 @@ the database and edited via `PUT /api/config/preferences` + `POST /api/config/so
 
 ## Endpoints
 
-`GET /health`, `GET /status`; `/api/repositories` (list/detail/`POST search`);
-`/api/libraries` (list/detail-history/add/remove); `/api/articles`
-(list/detail/`search`); `/api/curation` (list/`stats`/`PUT {id}/review`);
-`/api/tasks` (list/`POST {name}/trigger`); `/api/config/preferences` +
-`/api/config/sources`. Full schemas at `/docs`.
+`GET /` (review UI); `GET /health`, `GET /status`; `/api/feed` (ranked unified
+feed with `status`/`item_type`/`min_score`/`tag`/`since` filters);
+`/api/repositories` (list/detail/`POST search`); `/api/libraries`
+(list/detail-history/add/remove); `/api/articles` (list/detail/`search`);
+`/api/curation` (list/`stats`/`PUT {id}/review`/bulk review); `/api/tasks`
+(list/`POST {name}/trigger`); `/api/config/preferences` + `/api/config/sources`.
+Full schemas at `/docs`.
 
 A few more examples:
 

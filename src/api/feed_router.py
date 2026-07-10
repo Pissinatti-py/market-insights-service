@@ -8,6 +8,7 @@ never surface unless explicitly requested via ``?status=``.
 """
 
 import uuid
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -62,12 +63,33 @@ async def feed(
     status: CurationStatus | None = Query(
         None, description="Default: pending + approved (review is optional grooming)"
     ),
+    item_type: CurationItemType | None = Query(None),
+    min_score: float | None = Query(None, ge=0, le=1),
+    tag: str | None = Query(None, description="Exact tag match (lowercase)"),
+    since: datetime | None = Query(None, description="Only items curated on/after this moment"),
     db: AsyncSession = Depends(get_db_async_session),
 ) -> Page[FeedItem]:
     """Curated signals across all sources, most important first."""
     status_filter = status if status is not None else [CurationStatus.PENDING, CurationStatus.APPROVED]
+    filters: dict = {"status": status_filter}
+    if item_type is not None:
+        filters["item_type"] = item_type
+
+    expressions = []
+    if min_score is not None:
+        expressions.append(Curation.importance_score >= min_score)
+    if tag is not None:
+        expressions.append(Curation.tags.contains([tag.strip().lower()]))
+    if since is not None:
+        expressions.append(Curation.created_at >= since)
+
     result = await _curation.paginate(
-        db, page=page, per_page=per_page, filters={"status": status_filter}, order_by="-importance_score"
+        db,
+        page=page,
+        per_page=per_page,
+        filters=filters,
+        expressions=expressions,
+        order_by="-importance_score",
     )
     rendered = await _render_items(db, result.items)
 

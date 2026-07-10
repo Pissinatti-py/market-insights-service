@@ -15,7 +15,7 @@ Extended docs live in `docs/` (architecture, flows, data-model, endpoints, confi
 Run via the Makefile (Docker) or `uv` directly (local). Python 3.13, package manager is **uv** (not pip).
 
 ```bash
-# Docker (recommended) — api :8003, postgres, redis, celery worker + beat
+# Docker (recommended) — api :8003, postgres, redis, celery (worker + embedded beat)
 make up                 # docker compose up --build  (api migrates on boot)
 make down / make logs
 make migrate            # alembic upgrade head (inside api container)
@@ -40,6 +40,7 @@ uv run pytest tests/unit/test_github_collector.py::test_name   # single test
 ```
 
 Trigger a task over HTTP without a shell: `POST /api/tasks/{short_name}/trigger`; list runs at `GET /status`.
+The review UI (single static page over the API) is served at `GET /` from `src/static/index.html`.
 
 ## Architecture
 
@@ -50,13 +51,15 @@ asyncpg URL; the sync URL is derived by stripping `+asyncpg`.
 
 **Request path (FastAPI).** `src/api/router.py` mounts all routers under `API_PREFIX` (`/api`).
 Routers → `db/managers/*` → models. Managers subclass `BaseManager` (`db/managers/base_manager.py`),
-a generic async CRUD (`create/get/get_multi/paginate/update/delete/soft_delete`) parameterized by
-`(Model, CreateSchema, UpdateSchema)`. Prefer adding query methods to the relevant manager over
-inlining SQL in a router. Pydantic schemas live in `src/schemas/`.
+a generic async CRUD (`create/get/get_multi/paginate/update/soft_delete`) parameterized by the model.
+Prefer adding query methods to the relevant manager over inlining SQL in a router. Pydantic schemas
+live in `src/schemas/`; list endpoints envelope results with `Page.from_result(...)`.
 
 **Collection path (Celery).** `src/tasks/*` are the thin task wrappers; the real work lives in
 `src/services/collectors/*` (github, packages, articles — pure functions returning validated schema
-rows, all HTTP via httpx). Each task: read the `Preference` row → fetch → `bulk_upsert_dedup(...)`.
+rows, all HTTP via httpx). Each task: read the `Preference` row → fetch → `bulk_upsert_dedup(...)` →
+**chain `curate_uncurated` when anything was inserted**. Articles additionally pass an age gate
+(`ARTICLE_MAX_AGE_DAYS`) and a `title_fingerprint` near-dup collapse before the upsert.
 
 **Idempotency is structural.** Every collected row carries a unique `dedup_key`; `db/upsert.py`
 does `INSERT … ON CONFLICT (dedup_key) DO NOTHING` and returns only the newly-inserted rows, so
@@ -64,13 +67,15 @@ re-runs are no-ops and curation only chains over new items. Curation is likewise
 `UniqueConstraint(item_type, item_id)` on `mi__curation`.
 
 **Curation is a two-stage LLM pipeline** (`src/services/agents/`). `enrichment.build_context()`
-gathers deterministic evidence first — full article body for articles (`tools/article_reader`), or
-web coverage + a trending signal for repos/releases (`tools/web_search`, `tools/trending`) — every
-tool best-effort (a failure drops its block, never breaks the run). Then `curation_agent.curate()`
-sends item + profile + context to Ollama's `/api/chat` (JSON mode, schema-constrained) and validates
-the output through `CurationCreate`. **The curation prompt lives only in `curation_agent.py`** — never
-inline it into a task. Retriable failures (Ollama down/5xx) raise `CollectorRetriable`; bad output
-raises `CollectorTerminal` (see `src/core/exceptions.py`).
+fetches the full article body for articles (`tools/article_reader`, best-effort — a failure drops
+the block, never breaks the run); repos/releases carry their evidence in the rendered item text.
+Then `curation_agent.curate()` sends item + profile + context to Ollama's `/api/chat` (JSON mode,
+schema-constrained) and validates the output through `CurationCreate`. **The curation prompt lives
+only in `curation_agent.py`** — never inline it into a task. Retriable failures (Ollama down/5xx)
+raise `CollectorRetriable` and the task retries; bad output raises `CollectorTerminal` and the item
+is **dead-lettered** as a `status=failed` curation row (never re-selected; `recurate_all` is the
+retry path). The batch (`CURATION_BATCH_SIZE`, default 50) is drained round-robin across the three
+item types, newest first.
 
 **Task-run bookkeeping is automatic.** `src/core/celery/task_runs.py` connects a `task_postrun`
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are

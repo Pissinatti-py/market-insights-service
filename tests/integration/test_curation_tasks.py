@@ -7,7 +7,7 @@ import pytest
 from src.core.exceptions import CollectorTerminal
 from src.db.session import SyncSession
 from src.models.article import Article, ArticleSource
-from src.models.curation import Curation, CurationItemType, CurationStatus
+from src.models.curation import Curation, CurationStatus
 from src.models.library import Library, LibraryRelease, PackageEcosystem
 from src.models.repository import Repository
 from src.schemas.curation_schema import CurationCreate

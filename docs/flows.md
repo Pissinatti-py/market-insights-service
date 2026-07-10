@@ -12,6 +12,12 @@ exponential backoff (`max_retries=3`); terminal problems raise `CollectorTermina
 and are skipped/logged without retrying. Schedules live in
 `src/core/celery/schedules.py`.
 
+**Collection chains into curation.** When a collector inserts at least one new
+row it fires `curate_uncurated` immediately (`celery_app.send_task`), so fresh
+signals are scored within minutes instead of waiting for the daily sweep. The
+02:00 schedule remains as a fallback drain. Chained double-fires are harmless —
+curation is idempotent (see below).
+
 ---
 
 ## 1. Trending repositories — `collect_trending`
@@ -59,35 +65,48 @@ Returns `{"checked": N, "new_releases": M}`.
 
 1. Build the tag set from `keywords + areas` (de-duplicated).
 2. `articles.fetch_devto(tags)` — Dev.to API (terminal error → logged, run continues).
-3. `articles.fetch_hackernews(tags)` — Algolia HN search API, free/no-auth
+3. `articles.fetch_hackernews(tags, since=cutoff)` — Algolia HN search API,
+   free/no-auth, filtered server-side to stories newer than `ARTICLE_MAX_AGE_DAYS`
    (terminal error → logged, run continues). Text posts link to the HN item.
 4. `articles.fetch_rss(medium_feed(tag))` for each tag — Medium per-tag RSS.
    RSS parsing never raises; a dead feed just yields `[]`.
-5. `bulk_upsert_dedup` on `Article` (dedup on `source + url`).
+5. **Age gate**: rows published before the cutoff are dropped (undated rows pass —
+   the LLM caps stale items by date instead).
+6. **Near-dup collapse**: every row carries a `title_fingerprint` (normalized-title
+   hash); the same story syndicated across HN/Dev.to/Medium keeps only its
+   highest-engagement copy, and fingerprints already stored are skipped entirely —
+   no duplicate rows, no duplicate LLM calls.
+7. `bulk_upsert_dedup` on `Article` (dedup on `source + url`).
 
 Returns `{"fetched": N, "inserted": M}`.
 
 ## 4. AI curation — `curate_uncurated`
 
-`src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` · schedule: **daily 02:00**
+`src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` ·
+schedule: **chained after each collection** + daily 02:00 fallback sweep
 
-Curates a batch (`CURATION_BATCH_SIZE`, default 25) across all three item types
-(repositories, library releases, articles):
+Curates a batch (`CURATION_BATCH_SIZE`, default 50) **round-robin** across the
+three item types (articles, repositories, library releases), newest first — no
+type can starve the others:
 
-1. Read profile → `{stacks, areas, keywords}`.
-2. For each type, select rows with **no** curation row yet (`item.id NOT IN
-   (SELECT item_id FROM mi__curation WHERE item_type = …)`), up to the remaining budget.
-3. Render the item to a compact text string and call `curation_agent.curate(text, profile)`:
-   - POSTs to Ollama `/api/chat` in JSON mode (`format: json`, `temperature: 0.1`).
+1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
+2. Interleave rows with **no** curation row yet (`item.id NOT IN
+   (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the budget.
+3. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
+   truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
+4. Render the item (with published/created dates and engagement) and call
+   `curation_agent.curate(text, profile, context)`:
+   - POSTs to Ollama `/api/chat` constrained to the `CurationCreate` JSON schema
+     (`temperature: 0.1`). The prompt carries a scoring rubric, anchor examples,
+     and today's date (stale news is capped).
    - Ollama down / timeout / 5xx → `CollectorRetriable` (task retries).
-   - Empty or non-JSON content → `CollectorTerminal` (item skipped).
-   - The raw JSON is validated through `CurationCreate`; invalid output →
-     `CollectorTerminal`, **no row written**. The LLM never writes unchecked data.
-4. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
-   the `model` name, a `confidence` baseline (`0.85`), and the `raw_llm_output`
-   (kept in JSONB for debugging).
+   - Invalid output → `CollectorTerminal`: a **dead-letter row** is written
+     (`status=failed`, error in `raw_llm_output`) so the item is never re-selected;
+     `recurate_all` is its retry path.
+5. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
+   the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
 
-Returns `{"curated": N, "skipped": M}` (skipped = invalid LLM output).
+Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
 
 ### Idempotency, two ways
 
@@ -99,12 +118,14 @@ Returns `{"curated": N, "skipped": M}` (skipped = invalid LLM output).
 
 ## Human review loop
 
-Curation rows land as `pending`. A reviewer:
+Curation rows land as `pending` and **already show in the feed** (default =
+pending + approved) — review is optional grooming, not a gate. A reviewer:
 
+- `GET /` — the review UI: ranked feed, filters, approve/reject in one click.
 - `GET /api/curation?status=pending` — worklist, most important first.
   Optionally add `&item_type=repository|library_release|article` to narrow to one
   entity type (combines with `status`).
-- `GET /api/curation/stats` — counts by status.
+- `GET /api/curation/stats` — counts by status (including `failed` dead-letters).
 - `PUT /api/curation/{id}/review` — set `approved` / `rejected` (+ `reviewed_by`).
 
 The review status is advisory metadata on the curation row; it does not delete the

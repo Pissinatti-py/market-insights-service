@@ -1,7 +1,8 @@
 # API reference
 
 Base URL `http://localhost:8003`. Domain routes are under `API_PREFIX` (default
-`/api`); health/status sit at the root for probes. Interactive docs: `/docs`
+`/api`); health/status sit at the root for probes. The **review UI** is served at
+`/` (single page over these same endpoints). Interactive docs: `/docs`
 (Swagger), `/redoc`, raw spec at `/openapi.json`.
 
 List endpoints return a **`Page`** envelope: `{ total, items, page, per_page,
@@ -55,8 +56,8 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/curation` | List curation results, most important first. Optional `status=pending\|approved\|rejected`. `Page<CurationRead>`. |
-| GET | `/api/curation/stats` | Aggregate counts: `{total, pending, approved, rejected}`. |
+| GET | `/api/curation` | List curation results, most important first. Optional `status=pending\|approved\|rejected\|failed`. `Page<CurationRead>`. |
+| GET | `/api/curation/stats` | Aggregate counts: `{total, pending, approved, rejected, failed}`. |
 | PUT | `/api/curation/{curation_id}/review` | Approve/reject. Body: `{status, reviewed_by}`. `404` if missing. |
 
 > `/stats` is declared before `/{curation_id}` for the same reason as above.
@@ -65,16 +66,22 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/feed` | Unified curated feed across repos, releases, and articles — curation joined with a render of its item (`title`, `url`), most important first. Optional `status` (default `approved`). `Page<FeedItem>`. |
+| GET | `/api/feed` | Unified curated feed across repos, releases, and articles — curation joined with a render of its item (`title`, `url`), most important first. `Page<FeedItem>`. |
 
-Orphan curations (item hard-deleted) are silently skipped.
+Filters: `status` (default **pending + approved**; `rejected`/`failed` only when
+asked for explicitly), `item_type`, `min_score` (0–1), `tag` (exact lowercase
+match), `since` (curated on/after). Orphan curations (item hard-deleted) are
+silently skipped.
 
 ## Tasks — `/api/tasks`
 
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/tasks` | The triggerable tasks: short name → full Celery name. |
-| POST | `/api/tasks/{task_name}/trigger` | Enqueue a periodic task **now** (HTTP face of `make trigger`). Whitelisted short names only (`collect_trending`, `collect_releases`, `collect_articles`, `curate_uncurated`); `404` otherwise. Returns `202 {task, task_id, state: queued}` — the outcome lands in `/status`. |
+| POST | `/api/tasks/{task_name}/trigger` | Enqueue a periodic task **now** (HTTP face of `make trigger`). Whitelisted short names only (`collect_trending`, `collect_releases`, `collect_articles`, `curate_uncurated`, `recurate_all`); `404` otherwise. Returns `202 {task, task_id, state: queued}` — the outcome lands in `/status`. |
+
+> `recurate_all` re-runs curation over **every** existing row with the current
+> prompt/logic (also the retry path for `failed` rows) — use after prompt changes.
 
 ## Configuration — `/api/config`
 
@@ -82,7 +89,11 @@ Orphan curations (item hard-deleted) are silently skipped.
 |---|---|---|
 | GET | `/api/config/preferences` | Read the technical profile (creates an empty singleton on first read). |
 | PUT | `/api/config/preferences` | **Partial** update (only provided fields change): `stacks`, `areas`, `keywords`, `monitored_libraries`. |
-| POST | `/api/config/sources` | Set collector toggles. Body: `{enabled_sources: {github: true, articles: false, ...}}`. |
+| POST | `/api/config/sources` | Set collector toggles. Body: `{enabled_sources: {github: true, articles: false, ...}}`. Keys are validated — anything outside `github`/`packages`/`articles` is a `422`. |
+
+Field routing (also documented in the OpenAPI schema): `stacks` → GitHub language
+filters · `keywords` → GitHub search + article tags · `areas` → article tags ·
+`monitored_libraries` → `ecosystem:name` release polling.
 
 These edits change what the next collector run searches for and which collectors
 run — see [flows.md](flows.md#steering-future-runs).

@@ -1,0 +1,277 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Radar — Market Insights</title>
+<style>
+  :root {
+    --bg: #0e1420;
+    --panel: #151d2c;
+    --line: #263248;
+    --text: #d7dce6;
+    --muted: #7a8699;
+    --repo: #5ec8f2;
+    --article: #f2b35e;
+    --release: #b48ef2;
+    --ok: #65d9a5;
+    --no: #e0687a;
+    --mono: ui-monospace, "Cascadia Code", "JetBrains Mono", Menlo, Consolas, monospace;
+    --sans: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  * { box-sizing: border-box; margin: 0; }
+  body { background: var(--bg); color: var(--text); font-family: var(--sans); font-size: 15px; line-height: 1.5; }
+  a { color: inherit; }
+  button { font: inherit; cursor: pointer; }
+  :focus-visible { outline: 2px solid var(--repo); outline-offset: 2px; }
+
+  header {
+    display: flex; flex-wrap: wrap; align-items: baseline; gap: 1rem 2rem;
+    padding: 1.1rem 1.4rem; border-bottom: 1px solid var(--line);
+  }
+  h1 { font-family: var(--mono); font-size: 1.05rem; font-weight: 600; letter-spacing: .14em; text-transform: uppercase; }
+  h1 .dot { color: var(--article); }
+  #stats { display: flex; gap: 1.4rem; font-family: var(--mono); font-size: .8rem; color: var(--muted); }
+  #stats b { color: var(--text); font-weight: 600; margin-right: .35em; }
+
+  .actions { margin-left: auto; display: flex; gap: .5rem; flex-wrap: wrap; }
+  .actions button {
+    background: none; border: 1px solid var(--line); color: var(--muted);
+    font-family: var(--mono); font-size: .72rem; letter-spacing: .06em; text-transform: uppercase;
+    padding: .35rem .7rem; border-radius: 3px; transition: color .15s, border-color .15s;
+  }
+  .actions button:hover { color: var(--text); border-color: var(--muted); }
+  .actions button:disabled { opacity: .4; cursor: wait; }
+
+  #filters {
+    display: flex; flex-wrap: wrap; gap: .6rem; align-items: center;
+    padding: .8rem 1.4rem; border-bottom: 1px solid var(--line); background: var(--panel);
+  }
+  #filters label { font-family: var(--mono); font-size: .7rem; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  #filters select, #filters input {
+    background: var(--bg); color: var(--text); border: 1px solid var(--line); border-radius: 3px;
+    padding: .3rem .5rem; font-family: var(--mono); font-size: .8rem;
+  }
+  #filters input[type=number] { width: 5.5rem; }
+  #filters input[type=text] { width: 9rem; }
+
+  main { max-width: 60rem; margin: 0 auto; padding: 1rem 1.4rem 4rem; }
+  #meta { font-family: var(--mono); font-size: .75rem; color: var(--muted); padding: .6rem 0; }
+
+  .item {
+    display: grid; grid-template-columns: 7.5rem 1fr; gap: .2rem 1.1rem;
+    padding: 1rem 0; border-bottom: 1px solid var(--line);
+  }
+  .gauge { font-family: var(--mono); font-size: .8rem; padding-top: .15rem; }
+  .gauge .bar { letter-spacing: .1em; }
+  .gauge .val { color: var(--muted); margin-left: .3em; }
+  .t-repository .bar { color: var(--repo); }
+  .t-article .bar { color: var(--article); }
+  .t-library_release .bar { color: var(--release); }
+  .bar .off { opacity: .22; }
+
+  .item h2 { font-size: 1rem; font-weight: 600; }
+  .item h2 a { text-decoration: none; border-bottom: 1px solid transparent; }
+  .item h2 a:hover { border-bottom-color: var(--muted); }
+  .kind { font-family: var(--mono); font-size: .68rem; letter-spacing: .1em; text-transform: uppercase; }
+  .t-repository .kind { color: var(--repo); }
+  .t-article .kind { color: var(--article); }
+  .t-library_release .kind { color: var(--release); }
+  .summary { color: var(--muted); font-size: .9rem; margin-top: .25rem; grid-column: 2; }
+  .row { grid-column: 2; display: flex; flex-wrap: wrap; gap: .4rem; align-items: center; margin-top: .5rem; }
+  .tag {
+    background: none; border: 1px solid var(--line); color: var(--muted); border-radius: 3px;
+    font-family: var(--mono); font-size: .68rem; padding: .1rem .45rem;
+  }
+  .tag:hover { color: var(--text); }
+  .review { margin-left: auto; display: flex; gap: .4rem; }
+  .review button {
+    background: none; border: 1px solid var(--line); border-radius: 3px;
+    font-family: var(--mono); font-size: .7rem; padding: .2rem .6rem; color: var(--muted);
+  }
+  .review .ok:hover, .review .ok.on { color: var(--ok); border-color: var(--ok); }
+  .review .no:hover, .review .no.on { color: var(--no); border-color: var(--no); }
+
+  #pager { display: flex; gap: .6rem; align-items: center; padding-top: 1.2rem; font-family: var(--mono); font-size: .8rem; }
+  #pager button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 3px; padding: .3rem .8rem; }
+  #pager button:disabled { opacity: .35; cursor: default; }
+
+  #empty { padding: 3rem 0; color: var(--muted); font-family: var(--mono); font-size: .85rem; }
+  #toast {
+    position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
+    background: var(--panel); border: 1px solid var(--line); color: var(--text);
+    font-family: var(--mono); font-size: .8rem; padding: .5rem 1rem; border-radius: 4px;
+    opacity: 0; pointer-events: none; transition: opacity .2s;
+  }
+  #toast.show { opacity: 1; }
+  @media (prefers-reduced-motion: reduce) { * { transition: none !important; } }
+  @media (max-width: 40rem) {
+    .item { grid-template-columns: 1fr; }
+    .summary, .row { grid-column: 1; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>Radar<span class="dot">.</span>market-insights</h1>
+  <div id="stats">carregando…</div>
+  <div class="actions">
+    <button data-task="collect_trending">Coletar repos</button>
+    <button data-task="collect_releases">Coletar releases</button>
+    <button data-task="collect_articles">Coletar artigos</button>
+    <button data-task="curate_uncurated">Curar pendentes</button>
+  </div>
+</header>
+
+<div id="filters">
+  <label>status
+    <select id="f-status">
+      <option value="">pendentes + aprovados</option>
+      <option value="pending">pendentes</option>
+      <option value="approved">aprovados</option>
+      <option value="rejected">rejeitados</option>
+      <option value="failed">falhos</option>
+    </select>
+  </label>
+  <label>tipo
+    <select id="f-type">
+      <option value="">todos</option>
+      <option value="repository">repositório</option>
+      <option value="article">artigo</option>
+      <option value="library_release">release</option>
+    </select>
+  </label>
+  <label>score ≥ <input id="f-score" type="number" min="0" max="1" step="0.05" placeholder="0.0"></label>
+  <label>tag <input id="f-tag" type="text" placeholder="ex.: python"></label>
+  <button class="tag" id="f-clear">limpar</button>
+</div>
+
+<main>
+  <div id="meta"></div>
+  <div id="list"></div>
+  <div id="empty" hidden>Nada por aqui. Ajuste os filtros ou dispare uma coleta no topo da página.</div>
+  <div id="pager">
+    <button id="prev">‹ anterior</button>
+    <span id="page-info"></span>
+    <button id="next">próxima ›</button>
+  </div>
+</main>
+
+<div id="toast" role="status"></div>
+
+<script>
+const $ = (s) => document.querySelector(s);
+const state = { page: 1, perPage: 20, numPages: 1 };
+
+const KIND = { repository: "repositório", article: "artigo", library_release: "release" };
+
+function gauge(score) {
+  const filled = Math.round((score ?? 0) * 10);
+  const on = "▮".repeat(filled), off = "▮".repeat(10 - filled);
+  return `<span class="bar" aria-hidden="true">${on}<span class="off">${off}</span></span>` +
+         `<span class="val">${(score ?? 0).toFixed(2)}</span>`;
+}
+
+function toast(msg) {
+  const t = $("#toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(t._h);
+  t._h = setTimeout(() => t.classList.remove("show"), 2500);
+}
+
+function feedParams() {
+  const p = new URLSearchParams({ page: state.page, per_page: state.perPage });
+  if ($("#f-status").value) p.set("status", $("#f-status").value);
+  if ($("#f-type").value) p.set("item_type", $("#f-type").value);
+  if ($("#f-score").value) p.set("min_score", $("#f-score").value);
+  if ($("#f-tag").value.trim()) p.set("tag", $("#f-tag").value.trim());
+  return p;
+}
+
+async function loadStats() {
+  const s = await (await fetch("/api/curation/stats")).json();
+  $("#stats").innerHTML =
+    `<span><b>${s.total}</b>itens</span><span><b>${s.pending}</b>pendentes</span>` +
+    `<span><b>${s.approved}</b>aprovados</span><span><b>${s.rejected}</b>rejeitados</span>` +
+    `<span><b>${s.failed}</b>falhos</span>`;
+}
+
+async function loadFeed() {
+  const res = await fetch(`/api/feed?${feedParams()}`);
+  if (!res.ok) { toast(`Erro ao carregar o feed (${res.status})`); return; }
+  const data = await res.json();
+  state.numPages = data.num_pages;
+
+  $("#meta").textContent = `${data.total} sinais — página ${data.page} de ${data.num_pages}`;
+  $("#empty").hidden = data.items.length > 0;
+  $("#page-info").textContent = `${data.page}/${data.num_pages}`;
+  $("#prev").disabled = data.page <= 1;
+  $("#next").disabled = data.page >= data.num_pages;
+
+  $("#list").innerHTML = data.items.map((it) => `
+    <article class="item t-${it.item_type}">
+      <div class="gauge">${gauge(it.importance_score)}</div>
+      <div>
+        <span class="kind">${KIND[it.item_type] ?? it.item_type}</span>
+        <h2>${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title)}</h2>
+      </div>
+      <p class="summary">${esc(it.summary ?? "")}</p>
+      <div class="row">
+        ${(it.tags ?? []).slice(0, 6).map((t) => `<button class="tag" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}
+        <span class="review">
+          <button class="ok ${it.status === "approved" ? "on" : ""}" data-id="${it.curation_id}" data-status="approved">aprovar</button>
+          <button class="no ${it.status === "rejected" ? "on" : ""}" data-id="${it.curation_id}" data-status="rejected">rejeitar</button>
+        </span>
+      </div>
+    </article>`).join("");
+}
+
+function esc(s) {
+  return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
+}
+
+async function review(id, status) {
+  const res = await fetch(`/api/curation/${id}/review`, {
+    method: "PUT",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ status }),
+  });
+  if (!res.ok) { toast(`Erro ao revisar (${res.status})`); return; }
+  toast(status === "approved" ? "Aprovado" : "Rejeitado");
+  loadStats();
+  loadFeed();
+}
+
+async function trigger(btn) {
+  btn.disabled = true;
+  try {
+    const res = await fetch(`/api/tasks/${btn.dataset.task}/trigger`, { method: "POST" });
+    toast(res.ok ? `Tarefa ${btn.dataset.task} na fila` : `Erro ao disparar (${res.status})`);
+  } finally {
+    setTimeout(() => { btn.disabled = false; }, 3000);
+  }
+}
+
+document.addEventListener("click", (e) => {
+  const el = e.target.closest("button");
+  if (!el) return;
+  if (el.dataset.task) return trigger(el);
+  if (el.dataset.id) return review(el.dataset.id, el.dataset.status);
+  if (el.dataset.tag !== undefined) { $("#f-tag").value = el.dataset.tag; state.page = 1; loadFeed(); }
+  if (el.id === "f-clear") {
+    for (const id of ["f-status", "f-type", "f-score", "f-tag"]) $("#" + id).value = "";
+    state.page = 1; loadFeed();
+  }
+  if (el.id === "prev" && state.page > 1) { state.page--; loadFeed(); }
+  if (el.id === "next" && state.page < state.numPages) { state.page++; loadFeed(); }
+});
+for (const id of ["f-status", "f-type", "f-score", "f-tag"]) {
+  $("#" + id).addEventListener("change", () => { state.page = 1; loadFeed(); });
+}
+
+loadStats();
+loadFeed();
+</script>
+</body>
+</html>

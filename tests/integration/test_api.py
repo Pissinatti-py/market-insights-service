@@ -239,3 +239,41 @@ async def test_preferences_roundtrip(client: AsyncClient):
 
     sources = await client.post("/api/config/sources", json={"enabled_sources": {"github": False}})
     assert sources.json()["enabled_sources"] == {"github": False}
+
+
+@pytest.mark.asyncio
+async def test_feed_filters(client: AsyncClient, db_session: AsyncSession):
+    repo = await _seed_repo(db_session)
+    article = await _seed_article(db_session)
+    await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9)
+    low = await _seed_curation(db_session, CurationItemType.ARTICLE, article.id, 0.3)
+    low.tags = ["python", "web"]
+    await db_session.commit()
+
+    by_type = (await client.get("/api/feed?item_type=repository")).json()
+    assert by_type["total"] == 1 and by_type["items"][0]["item_type"] == "repository"
+
+    by_score = (await client.get("/api/feed?min_score=0.5")).json()
+    assert by_score["total"] == 1 and by_score["items"][0]["importance_score"] == 0.9
+
+    by_tag = (await client.get("/api/feed?tag=python")).json()
+    assert by_tag["total"] == 1 and by_tag["items"][0]["item_type"] == "article"
+
+    by_since = (await client.get("/api/feed?since=2099-01-01T00:00:00Z")).json()
+    assert by_since["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_sources_config_rejects_unknown_key(client: AsyncClient):
+    resp = await client.post("/api/config/sources", json={"enabled_sources": {"article": False}})
+    assert resp.status_code == 422
+    resp2 = await client.put("/api/config/preferences", json={"enabled_sources": {"linkedin": True}})
+    assert resp2.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_root_serves_review_ui(client: AsyncClient):
+    resp = await client.get("/")
+    assert resp.status_code == 200
+    assert "text/html" in resp.headers["content-type"]
+    assert "Radar" in resp.text
