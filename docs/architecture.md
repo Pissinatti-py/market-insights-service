@@ -35,7 +35,7 @@ src/
   models/                 SQLAlchemy ORM tables (mi__* prefix)
   tasks/                  Celery task entrypoints (one module per collector + curation)
   services/
-    collectors/             external fetchers: github, packages, articles, linkedin
+    collectors/             external fetchers: github, packages, articles
     agents/curation_agent.py the ONLY place the LLM prompt + Ollama call live
   core/
     conf.py                 pydantic-settings (env)

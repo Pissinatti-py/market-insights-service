@@ -3,7 +3,6 @@ from sqlalchemy.orm import Session
 
 from src.db.managers.base_manager import BaseManager
 from src.models.preference import SINGLETON_ID, Preference
-from src.schemas.preference_schema import PreferenceUpdate
 
 
 def profile_is_empty(pref: Preference) -> bool:
@@ -40,11 +39,7 @@ def get_or_create_sync(session: Session) -> Preference:
     return pref
 
 
-class _Empty(PreferenceUpdate):
-    pass
-
-
-class PreferenceRepository(BaseManager[Preference, _Empty, PreferenceUpdate]):
+class PreferenceRepository(BaseManager[Preference]):
     def __init__(self) -> None:
         super().__init__(model=Preference)
 

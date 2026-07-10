@@ -59,7 +59,7 @@ collector run, cascade-deleted with the repo. Drives star-growth/relevance chart
 ## mi__articles
 
 A collected article/post, stored once (`dedup_key` = hash of `source + url`).
-`source` ∈ `devto|medium|rss|linkedin|hackernews`. Columns: `title`, `author`, `url`,
+`source` ∈ `devto|medium|rss|hackernews`. Columns: `title`, `author`, `url`,
 `content` (excerpt/summary — full bodies are not fetched), `likes`, `comments`,
 `published_at`. Soft-deletable.
 

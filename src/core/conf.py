@@ -13,10 +13,8 @@ class Settings(BaseSettings):
     # Main app
     APP_NAME: str = "Market Insights Service"
     APP_VERSION: str = "0.1.0"
-    APP_ENV: str = "development"
     API_PREFIX: str = "/api"
     DEBUG: bool = True
-    LOG_LEVEL: str = "INFO"
 
     # CORS
     ALLOWED_ORIGINS: str = "*"
@@ -53,10 +51,6 @@ class Settings(BaseSettings):
     ENABLE_WEB_SEARCH: bool = True
     WEB_SEARCH_MAX_RESULTS: int = 5
     ARTICLE_MAX_CHARS: int = 6000
-
-    # Shared secret for future east-west wiring into the pissync network (sent as
-    # X-Internal-Token). Unused while standalone.
-    INTERNAL_TOKEN: str = "dev-internal-token"
 
     @property
     def cors_origins(self) -> list[str]:

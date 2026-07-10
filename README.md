@@ -17,7 +17,6 @@ Docker image) so it can later drop into that network unchanged.
 | `collect_trending` | GitHub Search API | every 6h |
 | `collect_releases` | PyPI + npm registries | daily 12:00 |
 | `collect_articles` | Dev.to API + Hacker News (Algolia) + Medium/blog RSS | every 12h |
-| `collect_linkedin` | LinkedIn (best-effort, **off by default**) | every 12h when enabled |
 | `curate_uncurated` | Ollama LLM curation | daily 02:00 |
 
 Every collected row carries a unique `dedup_key`; collectors upsert with
@@ -49,7 +48,7 @@ curl http://localhost:8003/status
 ```
 
 Triggerable: `collect_trending`, `collect_releases`, `collect_articles`,
-`collect_linkedin`, `curate_uncurated`. Or via the Makefile if you have a shell
+`curate_uncurated`, `recurate_all`. Or via the Makefile if you have a shell
 on the box:
 
 ```bash
@@ -69,7 +68,7 @@ Requires a reachable Postgres + Redis (`DATABASE_URL`, `REDIS_URL`, `CELERY_*`).
 
 All settings live in `src/core/conf.py` (pydantic-settings, read from `.env`).
 Key vars: `DATABASE_URL`, `REDIS_URL`, `CELERY_BROKER_URL`/`CELERY_RESULT_BACKEND`,
-`GITHUB_TOKEN`, `OLLAMA_BASE_URL`/`OLLAMA_MODEL`, `ENABLE_LINKEDIN`. The *what to
+`GITHUB_TOKEN`, `OLLAMA_BASE_URL`/`OLLAMA_MODEL`. The *what to
 search for* (stacks, keywords, monitored libraries, source toggles) is stored in
 the database and edited via `PUT /api/config/preferences` + `POST /api/config/sources`.
 
@@ -115,20 +114,6 @@ uv run pytest tests/unit              # no DB — collectors + curation agent (h
 uv run pytest tests/integration       # needs Postgres (TEST_DATABASE_URL)
 uv run pytest --cov=src               # everything + coverage
 ```
-
-## LinkedIn note
-
-LinkedIn has no stable public API — `collect_linkedin` is a best-effort
-discovery source that scrapes the private voyager API with a session cookie
-(`LINKEDIN_COOKIE`), off by default (`ENABLE_LINKEDIN`). It fans each post out
-into the existing tables: the post text (+ any shared external article) becomes
-an `Article`, a linked GitHub repo becomes a `Repository`, and a mentioned
-pypi/npm package becomes a `Library` (seeded `is_monitored=False`, so discovery
-doesn't force it into daily polling). It still **never raises** — the voyager
-endpoints/queryId/response shape are undocumented and rotate without notice, so
-every network and parse step is guarded and a failure just yields fewer rows,
-never a broken run. Scraping violates LinkedIn's ToS; the durable long-term
-path remains the official LinkedIn Marketing API.
 
 ## Tech stack
 

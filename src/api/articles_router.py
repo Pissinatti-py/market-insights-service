@@ -24,13 +24,7 @@ async def list_articles(
     result = await _repo.paginate(
         db, page=page, per_page=per_page, order_by="-published_at", expressions=[Article.deleted_at.is_(None)]
     )
-    return Page(
-        total=result.total,
-        items=[ArticleRead.model_validate(a) for a in result.items],
-        page=result.page,
-        per_page=result.per_page,
-        num_pages=result.num_pages,
-    )
+    return Page.from_result(result, items=[ArticleRead.model_validate(a) for a in result.items])
 
 
 # NOTE: declared before /{article_id} so "search" is not captured as an id.

@@ -31,13 +31,7 @@ async def list_repositories(
     result = await _repo.paginate(
         db, page=page, per_page=per_page, order_by=order_by, expressions=[Repository.deleted_at.is_(None)]
     )
-    return Page(
-        total=result.total,
-        items=[RepositoryRead.model_validate(r) for r in result.items],
-        page=result.page,
-        per_page=result.per_page,
-        num_pages=result.num_pages,
-    )
+    return Page.from_result(result, items=[RepositoryRead.model_validate(r) for r in result.items])
 
 
 @router.get("/{repository_id}", response_model=RepositoryRead)

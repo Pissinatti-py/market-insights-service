@@ -67,14 +67,6 @@ Returns `{"checked": N, "new_releases": M}`.
 
 Returns `{"fetched": N, "inserted": M}`.
 
-### LinkedIn — `collect_linkedin` (best-effort, off by default)
-
-A **separate** task, scheduled only when `ENABLE_LINKEDIN` is set. `linkedin.fetch_posts()`
-is a no-op stub today, and the task never raises — it can't affect the other
-sources or the beat loop. LinkedIn has no stable public API and scraping violates
-its ToS; the Dev.to/Medium collector already covers the "articles & insights"
-requirement. Upgrade path: the official LinkedIn Marketing API.
-
 ## 4. AI curation — `curate_uncurated`
 
 `src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` · schedule: **daily 02:00**

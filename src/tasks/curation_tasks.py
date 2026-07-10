@@ -55,6 +55,19 @@ def _uncurated(session, item_type: CurationItemType, model, limit: int) -> list:
     return list(session.execute(query.limit(limit)).scalars().all())
 
 
+def _load_profile(session) -> dict:
+    """The preference row rendered as the profile dict the LLM prompt receives."""
+    pref = get_or_create_sync(session)
+    return {"stacks": pref.stacks, "areas": pref.areas, "keywords": pref.keywords}
+
+
+def _curate_one(session, item_type: CurationItemType, item, profile: dict) -> tuple:
+    """Render → enrich → LLM for one item. Raises ``CollectorTerminal`` on bad output."""
+    _, render = _RENDERERS[item_type]
+    context = build_context(item_type, item, session)
+    return curation_agent.curate(render(item), profile, context=context)
+
+
 @celery_app.task(
     bind=True,
     name="src.tasks.curation_tasks.curate_uncurated",
@@ -76,8 +89,7 @@ def curate_uncurated(self) -> dict:
     skipped = 0
 
     with SyncSession() as session:
-        pref = get_or_create_sync(session)
-        profile = {"stacks": pref.stacks, "areas": pref.areas, "keywords": pref.keywords}
+        profile = _load_profile(session)
 
         remaining = batch
         for item_type, model, render in _TARGETS:
@@ -85,8 +97,7 @@ def curate_uncurated(self) -> dict:
                 break
             for item in _uncurated(session, item_type, model, remaining):
                 try:
-                    context = build_context(item_type, item, session)
-                    result, raw = curation_agent.curate(render(item), profile, context=context)
+                    result, raw = _curate_one(session, item_type, item, profile)
                 except CollectorTerminal as exc:
                     logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
                     skipped += 1
@@ -136,20 +147,18 @@ def recurate_all(self) -> dict:
     missing = 0
 
     with SyncSession() as session:
-        pref = get_or_create_sync(session)
-        profile = {"stacks": pref.stacks, "areas": pref.areas, "keywords": pref.keywords}
+        profile = _load_profile(session)
 
         curations = list(session.execute(select(Curation)).scalars().all())
         for cur in curations:
-            model, render = _RENDERERS[cur.item_type]
+            model, _ = _RENDERERS[cur.item_type]
             item = session.get(model, cur.item_id)
             if item is None:
                 missing += 1
                 continue
 
             try:
-                context = build_context(cur.item_type, item, session)
-                result, raw = curation_agent.curate(render(item), profile, context=context)
+                result, raw = _curate_one(session, cur.item_type, item, profile)
             except CollectorTerminal as exc:
                 logger.warning(f"recurate: invalid output for {cur.item_type.value}:{cur.item_id}: {exc}")
                 skipped += 1

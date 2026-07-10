@@ -5,14 +5,9 @@ from sqlalchemy.future import select
 
 from src.db.managers.base_manager import BaseManager
 from src.models.repository import Repository, RepositorySnapshot
-from src.schemas.repository_schema import RepositoryCreate
 
 
-class _Update(RepositoryCreate):
-    pass
-
-
-class RepositoryRepository(BaseManager[Repository, RepositoryCreate, _Update]):
+class RepositoryRepository(BaseManager[Repository]):
     """Repository data access. (Yes, the name is a pun the codebase has to live with.)"""
 
     def __init__(self) -> None:

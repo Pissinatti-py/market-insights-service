@@ -17,10 +17,8 @@ are dropped.
 |---|---|---|
 | `APP_NAME` | `Market Insights Service` | Shown in `/health` + Swagger title. |
 | `APP_VERSION` | `0.1.0` | |
-| `APP_ENV` | `development` | |
 | `API_PREFIX` | `/api` | Prefix for all domain routers. |
 | `DEBUG` | `true` | |
-| `LOG_LEVEL` | `INFO` | |
 | `ALLOWED_ORIGINS` | `*` | CORS. JSON array or comma-separated; empty ⇒ allow all. |
 
 ### Database (this service owns its Postgres)
@@ -54,17 +52,6 @@ are dropped.
 | `OLLAMA_MODEL` | `qwen3:14b-q8_0` | Also stamped onto each curation row. |
 | `OLLAMA_REQUEST_TIMEOUT_SECONDS` | `120.0` | |
 | `CURATION_BATCH_SIZE` | `25` | Items curated per `curate_uncurated` run. |
-
-### LinkedIn (off by default)
-| Var | Default | Notes |
-|---|---|---|
-| `ENABLE_LINKEDIN` | `false` | Only when `true` is the collector even scheduled. |
-| `LINKEDIN_COOKIE` | `""` | |
-
-### Internal
-| Var | Default | Notes |
-|---|---|---|
-| `INTERNAL_TOKEN` | `dev-internal-token` | Shared secret (`X-Internal-Token`) for future pissync-network wiring. Unused while standalone. |
 
 ## Runtime preferences (DB)
 

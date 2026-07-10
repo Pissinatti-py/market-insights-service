@@ -88,10 +88,4 @@ async def feed(
                 created_at=cur.created_at,
             )
         )
-    return Page(
-        total=result.total,
-        items=items,
-        page=result.page,
-        per_page=result.per_page,
-        num_pages=result.num_pages,
-    )
+    return Page.from_result(result, items=items)

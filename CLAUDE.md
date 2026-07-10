@@ -76,7 +76,7 @@ raises `CollectorTerminal` (see `src/core/exceptions.py`).
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are
 covered with zero extra code, and recording never breaks the task (errors are swallowed).
 
-**Config split.** Infra settings (`DATABASE_URL`, `OLLAMA_*`, `GITHUB_TOKEN`, `ENABLE_LINKEDIN`, …)
+**Config split.** Infra settings (`DATABASE_URL`, `OLLAMA_*`, `GITHUB_TOKEN`, …)
 are env-driven via pydantic-settings in `src/core/conf.py`. The *what to search for* (stacks,
 keywords, monitored libraries, per-source toggles) is a DB row, edited via
 `PUT /api/config/preferences` + `POST /api/config/sources` and read by collectors through
@@ -95,7 +95,3 @@ schedule is in `src/core/celery/schedules.py`.
   there and keep it in sync with the beat schedule.
 - **Migrations are Alembic**, not `Base.metadata.create_all`. `src/main.py` imports `src.models` for
   the side effect of registering mappers; keep new models importable from that package.
-
-> **Note:** the README and `docs/` describe a LinkedIn collector (`collect_linkedin`) and an
-> `ENABLE_LINKEDIN` toggle. No such code exists in `src/` — no task, no `collectors/linkedin.py`, no
-> beat entry. Treat LinkedIn as unimplemented/aspirational, not a real source.

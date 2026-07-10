@@ -31,13 +31,7 @@ async def list_curation(
 
     result = await _repo.paginate(db, page=page, per_page=per_page, order_by="-importance_score", filters=filters)
 
-    return Page(
-        total=result.total,
-        items=[CurationRead.model_validate(c) for c in result.items],
-        page=result.page,
-        per_page=result.per_page,
-        num_pages=result.num_pages,
-    )
+    return Page.from_result(result, items=[CurationRead.model_validate(c) for c in result.items])
 
 
 # NOTE: before /{curation_id} so "stats" is not parsed as an id.

@@ -14,15 +14,13 @@ from typing import Any, Dict, Generic, List, Optional, Sequence, Type, TypeVar, 
 
 from pydantic import BaseModel
 from pytz import utc
-from sqlalchemy import ColumnElement, delete, func, update
+from sqlalchemy import ColumnElement, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 from sqlalchemy.orm import DeclarativeBase
 from sqlalchemy.orm.interfaces import LoaderOption
 
 ModelType = TypeVar("ModelType", bound=DeclarativeBase)
-CreateSchemaType = TypeVar("CreateSchemaType", bound=BaseModel)
-UpdateSchemaType = TypeVar("UpdateSchemaType", bound=BaseModel)
 T = TypeVar("T")
 
 
@@ -35,7 +33,7 @@ class PaginatedResult(Generic[T]):
     num_pages: int
 
 
-class BaseManager(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
+class BaseManager(Generic[ModelType]):
     """Generic async CRUD for a SQLAlchemy model."""
 
     def __init__(self, model: Type[ModelType]):
@@ -44,7 +42,7 @@ class BaseManager(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
     async def create(
         self,
         db: AsyncSession,
-        obj_in: Union[CreateSchemaType, Dict[str, Any]],
+        obj_in: Union[BaseModel, Dict[str, Any]],
         auto_commit: bool = True,
     ) -> ModelType:
         """
@@ -53,7 +51,7 @@ class BaseManager(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         :param db: Database session.
         :type db: AsyncSession
         :param obj_in: Data for the instance (Pydantic model or dict).
-        :type obj_in: Union[CreateSchemaType, Dict[str, Any]]
+        :type obj_in: Union[BaseModel, Dict[str, Any]]
         :param auto_commit: Commit immediately, defaults to True.
         :type auto_commit: bool
         :return: The created instance.
@@ -231,7 +229,7 @@ class BaseManager(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         self,
         db: AsyncSession,
         id: Any,
-        obj_in: Union[UpdateSchemaType, Dict[str, Any]],
+        obj_in: Union[BaseModel, Dict[str, Any]],
     ) -> Optional[ModelType]:
         """
         Update an instance by ID. Returns None if not found.
@@ -254,19 +252,6 @@ class BaseManager(Generic[ModelType, CreateSchemaType, UpdateSchemaType]):
         await db.commit()
         await db.refresh(db_obj)
         return db_obj
-
-    async def delete(self, db: AsyncSession, id: Any) -> bool:
-        """
-        Hard-delete an instance by ID.
-
-        :param db: Database session.
-        :param id: Primary key.
-        :return: True if a row was deleted.
-        :rtype: bool
-        """
-        result = await db.execute(delete(self.model).where(self.model.id == id))
-        await db.commit()
-        return result.rowcount > 0
 
     async def soft_delete(self, db: AsyncSession, id: Any) -> bool:
         """
