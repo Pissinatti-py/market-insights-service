@@ -42,6 +42,8 @@ class Article(TimestampMixin, SoftDeleteMixin, Base):
     )
 
     title: Mapped[str] = mapped_column(String(512), nullable=False)
+    # Normalized-title hash for collapsing the same story syndicated across sources.
+    title_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     author: Mapped[str | None] = mapped_column(String(255), nullable=True)
     url: Mapped[str] = mapped_column(String(1024), nullable=False)
     content: Mapped[str | None] = mapped_column(Text, nullable=True)

@@ -71,5 +71,9 @@ def collect_trending(self) -> dict:
             )
             session.commit()
 
+    if inserted:
+        # Chain curation over the fresh rows — idempotent, so a double-fire is a no-op.
+        celery_app.send_task("src.tasks.curation_tasks.curate_uncurated")
+
     logger.info(f"collect_trending: fetched {len(rows)}, inserted {len(inserted)}")
     return {"fetched": len(rows), "inserted": len(inserted)}

@@ -195,24 +195,32 @@ async def _seed_curation(db: AsyncSession, item_type, item_id, score, status=Cur
 
 
 @pytest.mark.asyncio
-async def test_feed_returns_approved_items_ranked(client: AsyncClient, db_session: AsyncSession):
+async def test_feed_defaults_to_pending_plus_approved_ranked(client: AsyncClient, db_session: AsyncSession):
     repo = await _seed_repo(db_session)
     article = await _seed_article(db_session)
-    hidden = await _seed_article(db_session, title="Pending one", url="https://blog.example.com/pending")
+    fresh = await _seed_article(db_session, title="Pending one", url="https://blog.example.com/pending")
+    noise = await _seed_article(db_session, title="Rejected one", url="https://blog.example.com/rejected")
+    broken = await _seed_article(db_session, title="Failed one", url="https://blog.example.com/failed")
 
     await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9)
     await _seed_curation(db_session, CurationItemType.ARTICLE, article.id, 0.4)
-    await _seed_curation(db_session, CurationItemType.ARTICLE, hidden.id, 0.99, status=CurationStatus.PENDING)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, fresh.id, 0.99, status=CurationStatus.PENDING)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, noise.id, 0.95, status=CurationStatus.REJECTED)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, broken.id, 0.95, status=CurationStatus.FAILED)
 
+    # Default: pending + approved, ranked by score — rejected/failed never surface.
     body = (await client.get("/api/feed")).json()
-    assert body["total"] == 2
-    first, second = body["items"]
-    assert first["item_type"] == "repository"
-    assert first["title"] == "octo/widget"
-    assert first["url"] == "https://github.com/octo/widget"
-    assert first["importance_score"] == 0.9  # JSON number, not Decimal's "0.900" string
-    assert second["item_type"] == "article"
-    assert second["title"] == "Async Rust"
+    assert body["total"] == 3
+    first, second, third = body["items"]
+    assert first["title"] == "Pending one"
+    assert second["item_type"] == "repository"
+    assert second["title"] == "octo/widget"
+    assert second["url"] == "https://github.com/octo/widget"
+    assert second["importance_score"] == 0.9  # JSON number, not Decimal's "0.900" string
+    assert third["title"] == "Async Rust"
+
+    approved_only = (await client.get("/api/feed?status=approved")).json()
+    assert approved_only["total"] == 2
 
     pending = (await client.get("/api/feed?status=pending")).json()
     assert pending["total"] == 1

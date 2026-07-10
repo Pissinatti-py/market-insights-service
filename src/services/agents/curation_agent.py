@@ -15,6 +15,7 @@ mirroring how pissync validates LLM output through the create-schema.
 from __future__ import annotations
 
 import json
+from datetime import date
 
 import httpx
 
@@ -22,29 +23,37 @@ from src.core.conf import settings
 from src.core.exceptions import CollectorRetriable, CollectorTerminal
 from src.schemas.curation_schema import CurationCreate
 
-# 0.85 baseline confidence for LLM-derived curation rows (same convention as the
-# pissync extractor — a "needs review" filter can target anything below this).
-_BASE_CONFIDENCE = "0.85"
-
 _SYSTEM_PROMPT = (
     "You are a senior software-engineering analyst curating tech-market signals for a "
     "team that also publishes about them. Given one item (a repository, a library "
-    "release, or an article) plus optional EXTRA CONTEXT (a full article body, recent "
-    "web coverage, or a trending signal) and the user's technical profile, judge how "
-    "relevant and important it is.\n"
+    "release, or an article) plus optional EXTRA CONTEXT (a full article body or a "
+    "trending signal) and the user's technical profile, judge how relevant and "
+    "important it is.\n"
     "Weigh these heavily:\n"
     "- News and publishable topics — an article, announcement, or development worth "
     "writing about scores high even if it is not a brand-new library.\n"
     "- A common or already-used library is highly relevant when a NEW feature, release, "
     "or related news pops out around it — established does not mean unimportant.\n"
-    "- Trending momentum and recent web coverage in EXTRA CONTEXT are strong evidence; "
-    "use the full article body, when present, as the primary basis for an article.\n"
+    "- A library the user explicitly monitors (monitored_libraries in the profile) is a "
+    "strong relevance signal for its releases.\n"
+    "- Use the full article body in EXTRA CONTEXT, when present, as the primary basis "
+    "for an article.\n"
+    "- Recency matters: news older than ~2 weeks relative to TODAY is stale — cap it at "
+    "0.4 unless it is a durable reference/resource.\n"
     "Calibrate importance_score against this rubric — spread scores across the full "
     "range; do NOT default to the top band:\n"
     "- 0.9-1.0: exceptional, must-see for this profile (rare — a handful per week at most)\n"
     "- 0.7-0.9: clearly relevant news or release worth reading soon\n"
     "- 0.4-0.7: solid but routine; fine to batch-read later\n"
     "- below 0.4: marginal or noise for this profile\n"
+    "Anchor examples (calibrate against these):\n"
+    "- 0.95: \"Major framework in the user's stack ships a breaking major release with a "
+    'migration guide" — must-see, act soon.\n'
+    '- 0.75: "A library the user monitors ships a minor release with a genuinely useful '
+    'new feature" — worth reading this week.\n'
+    '- 0.55: "Competent tutorial covering a topic in the user\'s stack, nothing novel" — '
+    "batch-read later.\n"
+    '- 0.20: "Generic listicle or old news resurfaced, unrelated to the profile" — noise.\n'
     "Respond with ONLY a JSON object — no prose before or after."
 )
 
@@ -53,7 +62,8 @@ def _user_prompt(item_text: str, profile: dict, context: str = "") -> str:
     """Build the per-item user prompt embedding the profile, item, context, and contract."""
     extra = f"EXTRA CONTEXT:\n{context}\n\n" if context else ""
     return (
-        f"USER PROFILE (stacks/areas/keywords):\n{json.dumps(profile, ensure_ascii=False)}\n\n"
+        f"TODAY: {date.today().isoformat()}\n\n"
+        f"USER PROFILE (stacks/areas/keywords/monitored_libraries):\n{json.dumps(profile, ensure_ascii=False)}\n\n"
         f"ITEM:\n{item_text}\n\n"
         f"{extra}"
         "Return a JSON object with exactly these keys:\n"
@@ -141,8 +151,3 @@ def _coerce(raw: dict) -> CurationCreate:
         return CurationCreate.model_validate(raw)
     except Exception as exc:  # pydantic ValidationError or coercion error
         raise CollectorTerminal(f"curation: invalid model output: {exc}") from exc
-
-
-def base_confidence() -> str:
-    """The baseline confidence stamped on LLM-derived curation rows."""
-    return _BASE_CONFIDENCE

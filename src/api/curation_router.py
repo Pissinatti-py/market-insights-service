@@ -45,6 +45,7 @@ async def curation_stats(db: AsyncSession = Depends(get_db_async_session)) -> Cu
         pending=counts.get(CurationStatus.PENDING, 0),
         approved=counts.get(CurationStatus.APPROVED, 0),
         rejected=counts.get(CurationStatus.REJECTED, 0),
+        failed=counts.get(CurationStatus.FAILED, 0),
     )
 
 

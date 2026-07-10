@@ -57,13 +57,26 @@ def test_curate_omits_context_block_when_empty():
 
 @respx.mock
 def test_system_prompt_carries_scoring_rubric():
-    """The calibration rubric must reach the model — guards against prompt regressions."""
+    """The calibration rubric + anchor examples must reach the model — guards against prompt regressions."""
     body = '{"summary": "ok", "tags": [], "importance_score": 0.5}'
     route = respx.post(_OLLAMA).mock(return_value=_ollama_response(body))
     curation_agent.curate("item", {})
     system_msg = json.loads(route.calls.last.request.content)["messages"][0]["content"]
     assert "0.9-1.0" in system_msg
     assert "do NOT default to the top band" in system_msg
+    assert "Anchor examples" in system_msg
+    assert "stale" in system_msg  # recency instruction
+
+
+@respx.mock
+def test_user_prompt_carries_today_and_full_profile():
+    """TODAY grounds the staleness cap; monitored_libraries must reach the model."""
+    body = '{"summary": "ok", "tags": [], "importance_score": 0.5}'
+    route = respx.post(_OLLAMA).mock(return_value=_ollama_response(body))
+    curation_agent.curate("item", {"monitored_libraries": ["pypi:fastapi"]})
+    user_msg = json.loads(route.calls.last.request.content)["messages"][1]["content"]
+    assert "TODAY: " in user_msg
+    assert "pypi:fastapi" in user_msg
 
 
 @respx.mock

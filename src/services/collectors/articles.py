@@ -9,6 +9,7 @@ Each row is deduped on a hash of ``source + url``.
 from __future__ import annotations
 
 import hashlib
+import re
 from datetime import datetime, timezone
 from time import mktime
 
@@ -37,6 +38,27 @@ def dedup_key(source: ArticleSource, url: str) -> str:
     """
     digest = hashlib.sha256(url.strip().lower().encode("utf-8")).hexdigest()[:32]
     return f"{source.value}:{digest}"
+
+
+_TITLE_PREFIX_RE = re.compile(r"^(show hn|ask hn|tell hn|launch hn)\s*:\s*", re.IGNORECASE)
+_NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
+
+
+def title_fingerprint(title: str) -> str:
+    """
+    Cross-source fingerprint of a normalized title: ``sha256[:16]``.
+
+    Collapses the same story syndicated across HN/Dev.to/Medium — lowercased,
+    "Show HN:"-style prefixes stripped, non-alphanumerics squashed.
+
+    :param title: The raw article title.
+    :type title: str
+    :return: A 16-char hex fingerprint.
+    :rtype: str
+    """
+    normalized = _TITLE_PREFIX_RE.sub("", title.strip().lower())
+    normalized = _NON_ALNUM_RE.sub(" ", normalized).strip()
+    return hashlib.sha256(normalized.encode("utf-8")).hexdigest()[:16]
 
 
 def fetch_devto(tags: list[str], per_page: int = 30) -> list[ArticleCreate]:
@@ -81,10 +103,12 @@ def fetch_devto(tags: list[str], per_page: int = 30) -> list[ArticleCreate]:
 def _parse_devto_item(item: dict) -> ArticleCreate:
     """Map one Dev.to API article to an :class:`ArticleCreate`."""
     url = item.get("url", "")
+    title = item.get("title", "(untitled)")
     return ArticleCreate(
         dedup_key=dedup_key(ArticleSource.DEVTO, url),
         source=ArticleSource.DEVTO,
-        title=item.get("title", "(untitled)"),
+        title=title,
+        title_fingerprint=title_fingerprint(title),
         author=(item.get("user") or {}).get("name"),
         url=url,
         content=item.get("description"),
@@ -94,7 +118,7 @@ def _parse_devto_item(item: dict) -> ArticleCreate:
     )
 
 
-def fetch_hackernews(keywords: list[str], per_page: int = 30) -> list[ArticleCreate]:
+def fetch_hackernews(keywords: list[str], per_page: int = 30, since: datetime | None = None) -> list[ArticleCreate]:
     """
     Fetch recent Hacker News stories for the given keywords (Algolia HN API).
 
@@ -105,6 +129,9 @@ def fetch_hackernews(keywords: list[str], per_page: int = 30) -> list[ArticleCre
     :type keywords: list[str]
     :param per_page: Max stories per keyword.
     :type per_page: int
+    :param since: Only stories created after this moment (Algolia ``numericFilters``) —
+        without it, relevance-ranked search happily resurfaces years-old stories.
+    :type since: datetime | None
     :return: Validated article rows.
     :rtype: list[ArticleCreate]
     :raises CollectorRetriable: Timeout, transport error, 429, or 5xx.
@@ -114,6 +141,8 @@ def fetch_hackernews(keywords: list[str], per_page: int = 30) -> list[ArticleCre
     with httpx.Client(timeout=settings.COLLECTOR_HTTP_TIMEOUT_SECONDS) as client:
         for keyword in keywords or [""]:
             params = {"tags": "story", "hitsPerPage": per_page}
+            if since is not None:
+                params["numericFilters"] = f"created_at_i>{int(since.timestamp())}"
             if keyword:
                 params["query"] = keyword
             try:
@@ -138,10 +167,12 @@ def fetch_hackernews(keywords: list[str], per_page: int = 30) -> list[ArticleCre
 def _parse_hn_hit(hit: dict) -> ArticleCreate:
     """Map one Algolia HN story hit to an :class:`ArticleCreate`."""
     url = hit.get("url") or f"https://news.ycombinator.com/item?id={hit.get('objectID', '')}"
+    title = hit.get("title") or "(untitled)"
     return ArticleCreate(
         dedup_key=dedup_key(ArticleSource.HACKERNEWS, url),
         source=ArticleSource.HACKERNEWS,
-        title=hit.get("title") or "(untitled)",
+        title=title,
+        title_fingerprint=title_fingerprint(title),
         author=hit.get("author"),
         url=url,
         content=hit.get("story_text"),
@@ -172,11 +203,13 @@ def fetch_rss(feed_url: str, source: ArticleSource = ArticleSource.RSS) -> list[
         url = entry.get("link")
         if not url:
             continue
+        title = entry.get("title", "(untitled)")
         out.append(
             ArticleCreate(
                 dedup_key=dedup_key(source, url),
                 source=source,
-                title=entry.get("title", "(untitled)"),
+                title=title,
+                title_fingerprint=title_fingerprint(title),
                 author=entry.get("author"),
                 url=url,
                 content=entry.get("summary"),

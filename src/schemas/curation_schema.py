@@ -48,7 +48,6 @@ class CurationRead(BaseModel):
     status: CurationStatus
     reviewed_by: str | None
     model: str | None
-    confidence: float | None
     created_at: datetime
 
 
@@ -72,3 +71,4 @@ class CurationStats(BaseModel):
     pending: int
     approved: int
     rejected: int
+    failed: int

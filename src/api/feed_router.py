@@ -3,7 +3,8 @@ Unified feed — the product face of the pipeline.
 
 One call returns curated signals across all three item tables (repositories,
 library releases, articles), joined with their curation row, ranked by the
-LLM's importance score. Defaults to approved items only.
+LLM's importance score. Defaults to pending + approved — rejected/failed items
+never surface unless explicitly requested via ``?status=``.
 """
 
 import uuid
@@ -58,12 +59,15 @@ async def _render_items(
 async def feed(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
-    status: CurationStatus = Query(CurationStatus.APPROVED),
+    status: CurationStatus | None = Query(
+        None, description="Default: pending + approved (review is optional grooming)"
+    ),
     db: AsyncSession = Depends(get_db_async_session),
 ) -> Page[FeedItem]:
     """Curated signals across all sources, most important first."""
+    status_filter = status if status is not None else [CurationStatus.PENDING, CurationStatus.APPROVED]
     result = await _curation.paginate(
-        db, page=page, per_page=per_page, filters={"status": status}, order_by="-importance_score"
+        db, page=page, per_page=per_page, filters={"status": status_filter}, order_by="-importance_score"
     )
     rendered = await _render_items(db, result.items)
 

@@ -42,15 +42,15 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
     OLLAMA_MODEL: str = "qwen3:14b-q8_0"
     OLLAMA_REQUEST_TIMEOUT_SECONDS: float = 120.0
-    # Per-run safety cap: curate_uncurated drains the whole backlog up to this many
-    # items per run; anything beyond waits for the next scheduled run.
-    CURATION_BATCH_SIZE: int = 200
+    # Per-run safety cap: curation is chained after each collector, so runs stay
+    # small; anything beyond waits for the next chained run or the daily sweep.
+    CURATION_BATCH_SIZE: int = 50
 
-    # Curation enrichment — read the full article body and pull related web coverage
-    # before scoring. ENABLE_WEB_SEARCH is a kill-switch if DDG scraping gets flaky.
-    ENABLE_WEB_SEARCH: bool = True
-    WEB_SEARCH_MAX_RESULTS: int = 5
+    # Curation enrichment — read the full article body before scoring.
     ARTICLE_MAX_CHARS: int = 6000
+
+    # Articles older than this never enter the pipeline (kills resurfaced old news).
+    ARTICLE_MAX_AGE_DAYS: int = 14
 
     @property
     def cors_origins(self) -> list[str]:

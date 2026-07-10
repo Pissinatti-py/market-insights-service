@@ -12,6 +12,7 @@ class ArticleCreate(BaseModel):
     dedup_key: str
     source: ArticleSource
     title: str
+    title_fingerprint: str | None = None
     author: str | None = None
     url: str
     content: str | None = None

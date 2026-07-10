@@ -106,3 +106,25 @@ def test_fetch_rss_parses_content_string():
     assert row.source == ArticleSource.MEDIUM
     assert row.url == "https://blog.example.com/async-rust"
     assert row.published_at is not None
+
+
+def test_title_fingerprint_normalizes():
+    fp = articles.title_fingerprint
+    assert fp("Show HN: FastAPI 1.0!") == fp("fastapi 1.0")
+    assert fp("FastAPI 1.0 — released") == fp("FastAPI  1.0 released")
+    assert fp("FastAPI 1.0") != fp("Django 6.0")
+
+
+def test_parsers_stamp_title_fingerprint():
+    row = articles._parse_hn_hit(_hn_hit())
+    assert row.title_fingerprint == articles.title_fingerprint("Show HN: Widget")
+
+
+@respx.mock
+def test_fetch_hackernews_applies_recency_filter():
+    from datetime import datetime, timezone
+
+    route = respx.get(_HN_URL).mock(return_value=httpx.Response(200, json={"hits": []}))
+    since = datetime(2026, 7, 1, tzinfo=timezone.utc)
+    articles.fetch_hackernews(["python"], since=since)
+    assert route.calls.last.request.url.params["numericFilters"] == f"created_at_i>{int(since.timestamp())}"

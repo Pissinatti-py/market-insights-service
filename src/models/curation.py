@@ -25,6 +25,9 @@ class CurationStatus(str, enum.Enum):
     PENDING = "pending"
     APPROVED = "approved"
     REJECTED = "rejected"
+    # Dead-letter: the LLM output never validated for this item — the row keeps the
+    # item out of the uncurated selection; recurate_all is the retry path.
+    FAILED = "failed"
 
 
 class Curation(TimestampMixin, Base):
@@ -67,5 +70,4 @@ class Curation(TimestampMixin, Base):
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
 
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    confidence: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True)
     raw_llm_output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

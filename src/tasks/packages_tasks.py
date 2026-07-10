@@ -92,5 +92,9 @@ def collect_releases(self) -> dict:
             lib.current_version = latest.version
             session.commit()
 
+    if new_releases:
+        # Chain curation over the fresh rows — idempotent, so a double-fire is a no-op.
+        celery_app.send_task("src.tasks.curation_tasks.curate_uncurated")
+
     logger.info(f"collect_releases: checked {checked}, new {new_releases}")
     return {"checked": checked, "new_releases": new_releases}
