@@ -1,5 +1,5 @@
 <!doctype html>
-<html lang="pt-BR">
+<html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -114,46 +114,46 @@
 <body>
 <header>
   <h1>Radar<span class="dot">.</span>market-insights</h1>
-  <div id="stats">carregando…</div>
+  <div id="stats">loading…</div>
   <div class="actions">
-    <button data-task="collect_trending">Coletar repos</button>
-    <button data-task="collect_releases">Coletar releases</button>
-    <button data-task="collect_articles">Coletar artigos</button>
-    <button data-task="curate_uncurated">Curar pendentes</button>
+    <button data-task="collect_trending">Collect repos</button>
+    <button data-task="collect_releases">Collect releases</button>
+    <button data-task="collect_articles">Collect articles</button>
+    <button data-task="curate_uncurated">Curate pending</button>
   </div>
 </header>
 
 <div id="filters">
   <label>status
     <select id="f-status">
-      <option value="">pendentes + aprovados</option>
-      <option value="pending">pendentes</option>
-      <option value="approved">aprovados</option>
-      <option value="rejected">rejeitados</option>
-      <option value="failed">falhos</option>
+      <option value="">pending + approved</option>
+      <option value="pending">pending</option>
+      <option value="approved">approved</option>
+      <option value="rejected">rejected</option>
+      <option value="failed">failed</option>
     </select>
   </label>
-  <label>tipo
+  <label>type
     <select id="f-type">
-      <option value="">todos</option>
-      <option value="repository">repositório</option>
-      <option value="article">artigo</option>
+      <option value="">all</option>
+      <option value="repository">repository</option>
+      <option value="article">article</option>
       <option value="library_release">release</option>
     </select>
   </label>
   <label>score ≥ <input id="f-score" type="number" min="0" max="1" step="0.05" placeholder="0.0"></label>
-  <label>tag <input id="f-tag" type="text" placeholder="ex.: python"></label>
-  <button class="tag" id="f-clear">limpar</button>
+  <label>tag <input id="f-tag" type="text" placeholder="e.g. python"></label>
+  <button class="tag" id="f-clear">clear</button>
 </div>
 
 <main>
   <div id="meta"></div>
   <div id="list"></div>
-  <div id="empty" hidden>Nada por aqui. Ajuste os filtros ou dispare uma coleta no topo da página.</div>
+  <div id="empty" hidden>Nothing here. Adjust the filters or run a collection from the top of the page.</div>
   <div id="pager">
-    <button id="prev">‹ anterior</button>
+    <button id="prev">‹ previous</button>
     <span id="page-info"></span>
-    <button id="next">próxima ›</button>
+    <button id="next">next ›</button>
   </div>
 </main>
 
@@ -163,7 +163,7 @@
 const $ = (s) => document.querySelector(s);
 const state = { page: 1, perPage: 20, numPages: 1 };
 
-const KIND = { repository: "repositório", article: "artigo", library_release: "release" };
+const KIND = { repository: "repository", article: "article", library_release: "release" };
 
 function gauge(score) {
   const filled = Math.round((score ?? 0) * 10);
@@ -192,18 +192,18 @@ function feedParams() {
 async function loadStats() {
   const s = await (await fetch("/api/curation/stats")).json();
   $("#stats").innerHTML =
-    `<span><b>${s.total}</b>itens</span><span><b>${s.pending}</b>pendentes</span>` +
-    `<span><b>${s.approved}</b>aprovados</span><span><b>${s.rejected}</b>rejeitados</span>` +
-    `<span><b>${s.failed}</b>falhos</span>`;
+    `<span><b>${s.total}</b>items</span><span><b>${s.pending}</b>pending</span>` +
+    `<span><b>${s.approved}</b>approved</span><span><b>${s.rejected}</b>rejected</span>` +
+    `<span><b>${s.failed}</b>failed</span>`;
 }
 
 async function loadFeed() {
   const res = await fetch(`/api/feed?${feedParams()}`);
-  if (!res.ok) { toast(`Erro ao carregar o feed (${res.status})`); return; }
+  if (!res.ok) { toast(`Failed to load the feed (${res.status})`); return; }
   const data = await res.json();
   state.numPages = data.num_pages;
 
-  $("#meta").textContent = `${data.total} sinais — página ${data.page} de ${data.num_pages}`;
+  $("#meta").textContent = `${data.total} signals — page ${data.page} of ${data.num_pages}`;
   $("#empty").hidden = data.items.length > 0;
   $("#page-info").textContent = `${data.page}/${data.num_pages}`;
   $("#prev").disabled = data.page <= 1;
@@ -220,8 +220,8 @@ async function loadFeed() {
       <div class="row">
         ${(it.tags ?? []).slice(0, 6).map((t) => `<button class="tag" data-tag="${esc(t)}">${esc(t)}</button>`).join("")}
         <span class="review">
-          <button class="ok ${it.status === "approved" ? "on" : ""}" data-id="${it.curation_id}" data-status="approved">aprovar</button>
-          <button class="no ${it.status === "rejected" ? "on" : ""}" data-id="${it.curation_id}" data-status="rejected">rejeitar</button>
+          <button class="ok ${it.status === "approved" ? "on" : ""}" data-id="${it.curation_id}" data-status="approved">approve</button>
+          <button class="no ${it.status === "rejected" ? "on" : ""}" data-id="${it.curation_id}" data-status="rejected">reject</button>
         </span>
       </div>
     </article>`).join("");
@@ -237,8 +237,8 @@ async function review(id, status) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ status }),
   });
-  if (!res.ok) { toast(`Erro ao revisar (${res.status})`); return; }
-  toast(status === "approved" ? "Aprovado" : "Rejeitado");
+  if (!res.ok) { toast(`Review failed (${res.status})`); return; }
+  toast(status === "approved" ? "Approved" : "Rejected");
   loadStats();
   loadFeed();
 }
@@ -247,7 +247,7 @@ async function trigger(btn) {
   btn.disabled = true;
   try {
     const res = await fetch(`/api/tasks/${btn.dataset.task}/trigger`, { method: "POST" });
-    toast(res.ok ? `Tarefa ${btn.dataset.task} na fila` : `Erro ao disparar (${res.status})`);
+    toast(res.ok ? `Task ${btn.dataset.task} queued` : `Failed to queue task (${res.status})`);
   } finally {
     setTimeout(() => { btn.disabled = false; }, 3000);
   }
