@@ -1,0 +1,84 @@
+services:
+  api:
+    build: .
+    container_name: market_insights_api
+    entrypoint: ["scripts/docker-entrypoint.sh"]
+    command: uvicorn src.main:app --host 0.0.0.0 --port 8003 --reload
+    ports:
+      - "8003:8003"
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"  # reach a host-side Ollama daemon
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  db:
+    image: postgres:16-alpine
+    container_name: market_insights_db
+    restart: on-failure
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-postgres}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-market_insights}
+    ports:
+      - "5434:5432"  # dev convenience; 5432/5433 may be taken by sibling stacks
+    volumes:
+      - market_insights_db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+
+  redis:
+    image: redis:7-alpine
+    container_name: market_insights_redis
+    restart: on-failure
+    command: redis-server --appendonly yes
+    volumes:
+      - market_insights_redis_data:/data
+
+  celery_worker:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: market_insights_celery_worker
+    command: celery -A src.core.celery.celery_app worker --loglevel=info -Q celery
+    env_file:
+      - .env
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - .:/app
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_started
+
+  celery_beat:
+    build:
+      context: .
+      dockerfile: Dockerfile.celery
+    container_name: market_insights_celery_beat
+    command: celery -A src.core.celery.celery_app beat --loglevel=info --scheduler redbeat.RedBeatScheduler
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+    depends_on:
+      redis:
+        condition: service_started
+      celery_worker:
+        condition: service_started
+
+volumes:
+  market_insights_db_data:
+  market_insights_redis_data:

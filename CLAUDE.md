@@ -1,0 +1,101 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+`market-insights-service` is a standalone FastAPI microservice that collects software-development
+market signals (trending GitHub repos, PyPI/npm releases, technical articles), stores them in
+PostgreSQL, and curates them with a local LLM (Ollama) against a configurable technical profile.
+It deliberately mirrors **pissync-core** conventions (uv, async SQLAlchemy 2.0, Celery + RedBeat,
+single-stage uv Docker image) so it can drop into that network unchanged.
+
+Extended docs live in `docs/` (architecture, flows, data-model, endpoints, configuration, operations).
+
+## Commands
+
+Run via the Makefile (Docker) or `uv` directly (local). Python 3.13, package manager is **uv** (not pip).
+
+```bash
+# Docker (recommended) — api :8003, postgres, redis, celery worker + beat
+make up                 # docker compose up --build  (api migrates on boot)
+make down / make logs
+make migrate            # alembic upgrade head (inside api container)
+make makemigrations m="msg"   # alembic autogenerate
+make downgrade          # alembic downgrade -1
+make trigger t=src.tasks.github_tasks.collect_trending   # fire a task by full name
+
+# Local (needs reachable Postgres + Redis)
+uv sync
+uv run uvicorn src.main:app --reload --port 8003
+
+# Lint / format — ruff only (line-length 120, double quotes)
+make lint               # ruff check + ruff format --check
+make format             # ruff check --fix + ruff format
+
+# Tests
+make test               # uv run pytest -ra
+uv run pytest tests/unit          # no DB — collectors + agents, httpx mocked via respx
+uv run pytest tests/integration   # needs Postgres (TEST_DATABASE_URL)
+uv run pytest --cov=src           # coverage
+uv run pytest tests/unit/test_github_collector.py::test_name   # single test
+```
+
+Trigger a task over HTTP without a shell: `POST /api/tasks/{short_name}/trigger`; list runs at `GET /status`.
+
+## Architecture
+
+**Two DB engines, one models set** (`src/db/session.py`). The **async** engine drives the FastAPI
+request path (`get_db_async_session` dependency). The **sync** engine drives every Celery task and
+Alembic — collectors/curation always open `with SyncSession() as session:`. `DATABASE_URL` is the
+asyncpg URL; the sync URL is derived by stripping `+asyncpg`.
+
+**Request path (FastAPI).** `src/api/router.py` mounts all routers under `API_PREFIX` (`/api`).
+Routers → `db/managers/*` → models. Managers subclass `BaseManager` (`db/managers/base_manager.py`),
+a generic async CRUD (`create/get/get_multi/paginate/update/delete/soft_delete`) parameterized by
+`(Model, CreateSchema, UpdateSchema)`. Prefer adding query methods to the relevant manager over
+inlining SQL in a router. Pydantic schemas live in `src/schemas/`.
+
+**Collection path (Celery).** `src/tasks/*` are the thin task wrappers; the real work lives in
+`src/services/collectors/*` (github, packages, articles — pure functions returning validated schema
+rows, all HTTP via httpx). Each task: read the `Preference` row → fetch → `bulk_upsert_dedup(...)`.
+
+**Idempotency is structural.** Every collected row carries a unique `dedup_key`; `db/upsert.py`
+does `INSERT … ON CONFLICT (dedup_key) DO NOTHING` and returns only the newly-inserted rows, so
+re-runs are no-ops and curation only chains over new items. Curation is likewise once-per-item via a
+`UniqueConstraint(item_type, item_id)` on `mi__curation`.
+
+**Curation is a two-stage LLM pipeline** (`src/services/agents/`). `enrichment.build_context()`
+gathers deterministic evidence first — full article body for articles (`tools/article_reader`), or
+web coverage + a trending signal for repos/releases (`tools/web_search`, `tools/trending`) — every
+tool best-effort (a failure drops its block, never breaks the run). Then `curation_agent.curate()`
+sends item + profile + context to Ollama's `/api/chat` (JSON mode, schema-constrained) and validates
+the output through `CurationCreate`. **The curation prompt lives only in `curation_agent.py`** — never
+inline it into a task. Retriable failures (Ollama down/5xx) raise `CollectorRetriable`; bad output
+raises `CollectorTerminal` (see `src/core/exceptions.py`).
+
+**Task-run bookkeeping is automatic.** `src/core/celery/task_runs.py` connects a `task_postrun`
+signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are
+covered with zero extra code, and recording never breaks the task (errors are swallowed).
+
+**Config split.** Infra settings (`DATABASE_URL`, `OLLAMA_*`, `GITHUB_TOKEN`, `ENABLE_LINKEDIN`, …)
+are env-driven via pydantic-settings in `src/core/conf.py`. The *what to search for* (stacks,
+keywords, monitored libraries, per-source toggles) is a DB row, edited via
+`PUT /api/config/preferences` + `POST /api/config/sources` and read by collectors through
+`preference_manager.get_or_create_sync()`.
+
+**Celery config** (`src/core/celery/celery_app.py`): JSON-only bus (no pickle), `acks_late`,
+`prefetch=1`, RedBeat (Redis-backed) scheduler so the periodic schedule survives restarts. The beat
+schedule is in `src/core/celery/schedules.py`.
+
+## Conventions
+
+- **All tables are prefixed `mi__`** (`mi__repositories`, `mi__curation`, …) — namespaced so the
+  service can share a database in the pissync network.
+- **Task triggering is whitelisted.** `tasks_router.TRIGGERABLE_TASKS` maps a safe short name → full
+  Celery name; the task name is never taken from the request verbatim. Add new triggerable tasks
+  there and keep it in sync with the beat schedule.
+- **Migrations are Alembic**, not `Base.metadata.create_all`. `src/main.py` imports `src.models` for
+  the side effect of registering mappers; keep new models importable from that package.
+
+> **Note:** the README and `docs/` describe a LinkedIn collector (`collect_linkedin`) and an
+> `ENABLE_LINKEDIN` toggle. No such code exists in `src/` — no task, no `collectors/linkedin.py`, no
+> beat entry. Treat LinkedIn as unimplemented/aspirational, not a real source.
