@@ -30,6 +30,20 @@ Consume the result at **`GET /`** (single-page review UI: ranked feed, filters,
 approve/reject) or **`GET /api/feed`** (same data over JSON, default
 pending + approved).
 
+## Review UI
+
+One self-contained page (`src/static/index.html`, no build step) served at
+<http://localhost:8003/>:
+
+![Review UI — ranked feed with per-item score gauge, filters, and one-click review](docs/images/review-ui.png)
+
+- **Ranked feed** across repos, releases, and articles — the segment gauge and
+  score reflect the LLM's `importance_score` against your profile.
+- **Filters** for status, item type, minimum score, and tag (click any tag to
+  filter by it).
+- **One-click review** (`approve` / `reject`) and live stats per status.
+- **Run collectors on demand** from the header — no shell needed.
+
 ## Quick start (Docker)
 
 ```bash
