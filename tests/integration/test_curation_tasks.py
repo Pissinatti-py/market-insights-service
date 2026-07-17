@@ -7,7 +7,7 @@ import pytest
 from src.core.exceptions import CollectorTerminal
 from src.db.session import SyncSession
 from src.models.article import Article, ArticleSource
-from src.models.curation import Curation, CurationStatus
+from src.models.curation import Curation, CurationItemType, CurationStatus
 from src.models.library import Library, LibraryRelease, PackageEcosystem
 from src.models.repository import Repository
 from src.schemas.curation_schema import CurationCreate
@@ -93,6 +93,89 @@ def test_terminal_output_dead_letters_and_is_not_reselected(db_session, monkeypa
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
     result = curation_tasks.curate_uncurated.apply().get()
     assert result == {"curated": 0, "failed": 0}
+
+
+def test_lock_held_skips_run_entirely(db_session, monkeypatch):
+    with SyncSession() as session:
+        _seed_article(session, "locked-out")
+
+    monkeypatch.setattr(curation_tasks, "_acquire_curation_lock", lambda: False)
+    result = curation_tasks.curate_uncurated.apply().get()
+    assert result == {"skipped": "already running"}
+
+    with SyncSession() as session:
+        assert session.query(Curation).count() == 0
+
+
+def test_concurrent_duplicate_insert_does_not_kill_batch(db_session, monkeypatch):
+    """A sibling run inserting the same items mid-flight is skipped per item, not a crash."""
+    with SyncSession() as session:
+        a1 = _seed_article(session, "raced-1")
+        a2 = _seed_article(session, "raced-2")
+        _seed_repo(session, "owner/safe")
+        article_ids = [a1.id, a2.id]
+
+    def _racing_curate(item_text, profile, context=""):
+        # First call: a concurrent run finishes both articles before our commits land.
+        with SyncSession() as session:
+            for item_id in article_ids:
+                if not session.query(Curation).filter(Curation.item_id == item_id).count():
+                    session.add(
+                        Curation(
+                            item_type=CurationItemType.ARTICLE,
+                            item_id=item_id,
+                            status=CurationStatus.PENDING,
+                            model="sibling",
+                        )
+                    )
+            session.commit()
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _racing_curate)
+    result = curation_tasks.curate_uncurated.apply().get()
+    # Both articles lost the race and were skipped; the repo still curated; no crash.
+    assert result == {"curated": 1, "failed": 0}
+
+    with SyncSession() as session:
+        assert session.query(Curation).count() == 3
+
+
+def test_recurate_preserves_review_decisions(db_session, monkeypatch):
+    with SyncSession() as session:
+        reviewed = _seed_article(session, "reviewed")
+        dead = _seed_article(session, "dead-letter")
+        session.add(
+            Curation(
+                item_type=CurationItemType.ARTICLE,
+                item_id=reviewed.id,
+                summary="old summary",
+                tags=["old"],
+                importance_score=0.1,
+                status=CurationStatus.APPROVED,
+                model="old-model",
+            )
+        )
+        session.add(
+            Curation(
+                item_type=CurationItemType.ARTICLE,
+                item_id=dead.id,
+                status=CurationStatus.FAILED,
+                model="old-model",
+            )
+        )
+        session.commit()
+        reviewed_id, dead_id = reviewed.id, dead.id
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
+    result = curation_tasks.recurate_all.apply().get()
+    assert result == {"recurated": 2, "skipped": 0, "missing": 0}
+
+    with SyncSession() as session:
+        approved = session.query(Curation).filter(Curation.item_id == reviewed_id).one()
+        assert approved.status == CurationStatus.APPROVED  # human decision survives
+        assert approved.summary == "ok"  # AI fields still refreshed
+        retried = session.query(Curation).filter(Curation.item_id == dead_id).one()
+        assert retried.status == CurationStatus.PENDING  # failed rows go back into review
 
 
 def test_batch_round_robins_across_types(db_session, monkeypatch):

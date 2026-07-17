@@ -29,7 +29,7 @@ def get_application() -> FastAPI:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.cors_origins,
-        allow_credentials=True,
+        allow_credentials=False,  # no auth/cookies exist; True + wildcard origins is a CORS spec conflict
         allow_methods=["*"],
         allow_headers=["*"],
     )

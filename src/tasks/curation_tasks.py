@@ -3,15 +3,20 @@ AI curation Celery task.
 
 Scans collected items that have no curation row yet, asks the LLM to summarise /
 tag / score each against the profile, and writes a ``pending`` curation row.
-Idempotent two ways: only uncurated items are selected, and the
-``(item_type, item_id)`` unique constraint makes a concurrent re-run a no-op.
+Every collector chains this task, so runs overlap: a Redis single-flight lock
+skips a run while another is draining, and the ``(item_type, item_id)`` unique
+constraint is tolerated per item (skip, not crash) so a lost race never kills
+the batch or duplicates LLM work for long.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
 """
 
 from __future__ import annotations
 
+from redis import Redis
+from redis.exceptions import RedisError
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 
 from src.core.celery.celery_app import celery_app
 from src.core.conf import settings
@@ -103,6 +108,39 @@ def _curate_one(session, item_type: CurationItemType, item, profile: dict) -> tu
     return curation_agent.curate(render(item), profile, context=context)
 
 
+_LOCK_KEY = "mi:lock:curate_uncurated"
+_LOCK_TTL_SECONDS = 3 * 60 * 60  # comfortably above a worst-case batch (200 items × ~35 s LLM + enrichment)
+
+
+def _acquire_curation_lock():
+    """
+    Redis single-flight lock so overlapping runs don't curate the same items twice.
+
+    Returns the held lock, ``False`` when another run holds it, or ``None`` when
+    Redis is unreachable (fail open — the per-item ``IntegrityError`` guard in
+    ``_store`` still keeps a concurrent run harmless).
+    """
+    try:
+        client = Redis.from_url(settings.REDIS_URL, socket_connect_timeout=2, socket_timeout=2)
+        lock = client.lock(_LOCK_KEY, timeout=_LOCK_TTL_SECONDS)
+        return lock if lock.acquire(blocking=False) else False
+    except RedisError as exc:
+        logger.warning(f"curate: redis lock unavailable, running unlocked: {exc}")
+        return None
+
+
+def _store(session, row: Curation) -> bool:
+    """Insert one curation row; ``False`` when a concurrent run already curated the item."""
+    session.add(row)
+    try:
+        session.commit()
+        return True
+    except IntegrityError:
+        session.rollback()
+        logger.info(f"curate: {row.item_type.value}:{row.item_id} already curated by a concurrent run, skipping")
+        return False
+
+
 @celery_app.task(
     bind=True,
     name="src.tasks.curation_tasks.curate_uncurated",
@@ -114,39 +152,45 @@ def curate_uncurated(self) -> dict:
     """
     Drain the uncurated backlog, capped at ``CURATION_BATCH_SIZE`` items per run
     (safety cap — the rest waits for the next run). Types are interleaved
-    round-robin so articles cannot starve repos/releases.
+    round-robin so articles cannot starve repos/releases. Single-flight: if
+    another run is already draining, this one skips (the backlog waits for the
+    next scheduled/chained fire).
 
-    :return: ``{"curated": int, "failed": int}`` (failed = dead-lettered invalid output).
+    :return: ``{"curated": int, "failed": int}`` (failed = dead-lettered invalid
+        output), or ``{"skipped": "already running"}``.
     :rtype: dict
     """
+    lock = _acquire_curation_lock()
+    if lock is False:
+        logger.info("curate_uncurated: another run holds the lock, skipping")
+        return {"skipped": "already running"}
+
     curated = 0
     failed = 0
 
-    with SyncSession() as session:
-        profile = _load_profile(session)
+    try:
+        with SyncSession() as session:
+            profile = _load_profile(session)
 
-        for item_type, item in _next_batch(session, settings.CURATION_BATCH_SIZE):
-            try:
-                result, raw = _curate_one(session, item_type, item, profile)
-            except CollectorTerminal as exc:
-                logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
-                # Dead-letter: the unique constraint keeps the item out of future
-                # selections; recurate_all re-processes it after prompt fixes.
-                session.add(
-                    Curation(
+            for item_type, item in _next_batch(session, settings.CURATION_BATCH_SIZE):
+                try:
+                    result, raw = _curate_one(session, item_type, item, profile)
+                except CollectorTerminal as exc:
+                    logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
+                    # Dead-letter: the unique constraint keeps the item out of future
+                    # selections; recurate_all re-processes it after prompt fixes.
+                    dead_letter = Curation(
                         item_type=item_type,
                         item_id=item.id,
                         status=CurationStatus.FAILED,
                         model=settings.OLLAMA_MODEL,
                         raw_llm_output={"error": str(exc)},
                     )
-                )
-                session.commit()
-                failed += 1
-                continue
+                    if _store(session, dead_letter):
+                        failed += 1
+                    continue
 
-            session.add(
-                Curation(
+                row = Curation(
                     item_type=item_type,
                     item_id=item.id,
                     summary=result.summary,
@@ -156,9 +200,14 @@ def curate_uncurated(self) -> dict:
                     model=settings.OLLAMA_MODEL,
                     raw_llm_output=raw,
                 )
-            )
-            session.commit()
-            curated += 1
+                if _store(session, row):
+                    curated += 1
+    finally:
+        if lock:
+            try:
+                lock.release()
+            except RedisError:
+                pass  # lock expired mid-run; _store already tolerated any overlap
 
     logger.info(f"curate_uncurated: curated {curated}, failed {failed}")
     return {"curated": curated, "failed": failed}
@@ -175,10 +224,11 @@ def recurate_all(self) -> dict:
     """
     Re-run curation over **every** existing curation row with the current logic.
 
-    Overwrites the AI fields (summary/tags/score/model/raw output) in place and
-    resets ``status`` to ``pending`` — a full refresh after prompt/enrichment
-    changes, and the retry path for ``failed`` rows. Rows whose source item is
-    gone are counted as ``missing``.
+    Overwrites the AI fields (summary/tags/score/model/raw output) in place — a
+    full refresh after prompt/enrichment changes, and the retry path for
+    ``failed`` rows (which go back to ``pending``). Human review decisions are
+    preserved: ``approved``/``rejected`` rows keep their status. Rows whose
+    source item is gone are counted as ``missing``.
 
     :return: ``{"recurated": int, "skipped": int, "missing": int}``.
     :rtype: dict
@@ -208,7 +258,8 @@ def recurate_all(self) -> dict:
             cur.summary = result.summary
             cur.tags = result.tags
             cur.importance_score = result.importance_score
-            cur.status = CurationStatus.PENDING
+            if cur.status == CurationStatus.FAILED:
+                cur.status = CurationStatus.PENDING  # approved/rejected keep the human decision
             cur.model = settings.OLLAMA_MODEL
             cur.raw_llm_output = raw
             session.commit()
