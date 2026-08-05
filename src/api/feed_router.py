@@ -9,6 +9,7 @@ never surface unless explicitly requested via ``?status=``.
 
 import uuid
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -67,6 +68,9 @@ async def feed(
     min_score: float | None = Query(None, ge=0, le=1),
     tag: str | None = Query(None, description="Exact tag match (lowercase)"),
     since: datetime | None = Query(None, description="Only items curated on/after this moment"),
+    # Literal, not a free string: BaseManager silently skips unknown order fields, so a
+    # typo would quietly fall back to insertion order instead of erroring.
+    order_by: Literal["-importance_score", "-reviewed_at", "-created_at"] = Query("-importance_score"),
     db: AsyncSession = Depends(get_db_async_session),
 ) -> Page[FeedItem]:
     """Curated signals across all sources, most important first."""
@@ -89,7 +93,7 @@ async def feed(
         per_page=per_page,
         filters=filters,
         expressions=expressions,
-        order_by="-importance_score",
+        order_by=order_by,
     )
     rendered = await _render_items(db, result.items)
 
@@ -111,6 +115,7 @@ async def feed(
                 tags=cur.tags,
                 importance_score=cur.importance_score,
                 status=cur.status,
+                reviewed_at=cur.reviewed_at,
                 created_at=cur.created_at,
             )
         )

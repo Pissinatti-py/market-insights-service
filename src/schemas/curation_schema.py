@@ -47,6 +47,7 @@ class CurationRead(BaseModel):
     importance_score: float | None
     status: CurationStatus
     reviewed_by: str | None
+    reviewed_at: datetime | None = None
     model: str | None
     created_at: datetime
 

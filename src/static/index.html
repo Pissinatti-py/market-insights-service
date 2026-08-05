@@ -96,6 +96,24 @@
   #pager button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 3px; padding: .3rem .8rem; }
   #pager button:disabled { opacity: .35; cursor: default; }
 
+  #approved { margin-top: 2.5rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
+  #approved h2 {
+    font-family: var(--mono); font-size: .72rem; font-weight: 600; letter-spacing: .12em;
+    text-transform: uppercase; color: var(--muted); margin-bottom: .6rem;
+  }
+  #approved-list { list-style: none; padding: 0; }
+  #approved-list li {
+    display: flex; gap: .8rem; align-items: baseline;
+    padding: .35rem 0; border-bottom: 1px solid var(--line); font-size: .88rem;
+  }
+  #approved-list time { flex: 0 0 10.5rem; font-family: var(--mono); font-size: .72rem; color: var(--muted); }
+  #approved-list .kind { flex: 0 0 5.5rem; }
+  /* min-width:0 so a long title wraps inside its own column instead of blowing out the row. */
+  #approved-list .ttl { flex: 1 1 0; min-width: 0; }
+  #approved-list a { text-decoration: none; border-bottom: 1px solid transparent; }
+  #approved-list a:hover { border-bottom-color: var(--muted); }
+  #approved-empty { color: var(--muted); font-family: var(--mono); font-size: .8rem; }
+
   #empty { padding: 3rem 0; color: var(--muted); font-family: var(--mono); font-size: .85rem; }
   #toast {
     position: fixed; bottom: 1rem; left: 50%; transform: translateX(-50%);
@@ -155,6 +173,12 @@
     <span id="page-info"></span>
     <button id="next">next ›</button>
   </div>
+
+  <section id="approved">
+    <h2>recently approved</h2>
+    <ol id="approved-list"></ol>
+    <p id="approved-empty" hidden>Nothing approved yet.</p>
+  </section>
 </main>
 
 <div id="toast" role="status"></div>
@@ -227,6 +251,22 @@ async function loadFeed() {
     </article>`).join("");
 }
 
+// Newest-approved first, unpaginated — a running log of what survived review, so
+// approvals stay visible after they drop out of the filtered feed above.
+async function loadApproved() {
+  const res = await fetch("/api/feed?status=approved&order_by=-reviewed_at&per_page=20");
+  if (!res.ok) return;  // ponytail: silent — loadFeed already toasts when the API is down
+  const data = await res.json();
+
+  $("#approved-empty").hidden = data.items.length > 0;
+  $("#approved-list").innerHTML = data.items.map((it) => `
+    <li class="t-${it.item_type}">
+      <time datetime="${it.reviewed_at ?? ""}">${it.reviewed_at ? new Date(it.reviewed_at).toLocaleString() : "—"}</time>
+      <span class="kind">${KIND[it.item_type] ?? it.item_type}</span>
+      <span class="ttl">${it.url ? `<a href="${it.url}" target="_blank" rel="noopener">${esc(it.title)}</a>` : esc(it.title)}</span>
+    </li>`).join("");
+}
+
 function esc(s) {
   return String(s).replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;").replaceAll('"', "&quot;");
 }
@@ -241,6 +281,7 @@ async function review(id, status) {
   toast(status === "approved" ? "Approved" : "Rejected");
   loadStats();
   loadFeed();
+  loadApproved();
 }
 
 async function trigger(btn) {
@@ -272,6 +313,7 @@ for (const id of ["f-status", "f-type", "f-score", "f-tag"]) {
 
 loadStats();
 loadFeed();
+loadApproved();
 </script>
 </body>
 </html>

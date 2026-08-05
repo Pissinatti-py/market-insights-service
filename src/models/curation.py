@@ -1,9 +1,10 @@
 import enum
 import uuid
+from datetime import datetime
 from decimal import Decimal
 
+from sqlalchemy import DateTime, Numeric, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy import Numeric, String, Text, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -68,6 +69,9 @@ class Curation(TimestampMixin, Base):
         index=True,
     )
     reviewed_by: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # When a human last decided on this row (approve or reject). Distinct from updated_at,
+    # which recurate_all bumps while deliberately preserving the human decision.
+    reviewed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
 
     model: Mapped[str | None] = mapped_column(String(128), nullable=True)
     raw_llm_output: Mapped[dict | None] = mapped_column(JSONB, nullable=True)

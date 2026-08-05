@@ -58,7 +58,7 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 |---|---|---|
 | GET | `/api/curation` | List curation results, most important first. Optional `status=pending\|approved\|rejected\|failed`. `Page<CurationRead>`. |
 | GET | `/api/curation/stats` | Aggregate counts: `{total, pending, approved, rejected, failed}`. |
-| PUT | `/api/curation/{curation_id}/review` | Approve/reject. Body: `{status, reviewed_by}`. `404` if missing. |
+| PUT | `/api/curation/{curation_id}/review` | Approve/reject. Body: `{status, reviewed_by}`. Stamps `reviewed_at`. `404` if missing. |
 
 > `/stats` is declared before `/{curation_id}` for the same reason as above.
 
@@ -72,6 +72,10 @@ Filters: `status` (default **pending + approved**; `rejected`/`failed` only when
 asked for explicitly), `item_type`, `min_score` (0–1), `tag` (exact lowercase
 match), `since` (curated on/after). Orphan curations (item hard-deleted) are
 silently skipped.
+
+Ordering: `order_by` — one of `-importance_score` (default), `-reviewed_at`,
+`-created_at`; anything else is `422`. `?status=approved&order_by=-reviewed_at`
+is the "recently approved" list the review UI renders under the feed.
 
 ## Tasks — `/api/tasks`
 

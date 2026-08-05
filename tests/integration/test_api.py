@@ -138,6 +138,7 @@ async def test_curation_review_and_stats(client: AsyncClient, db_session: AsyncS
     reviewed = await client.put(f"/api/curation/{cur.id}/review", json={"status": "approved", "reviewed_by": "me"})
     assert reviewed.status_code == 200
     assert reviewed.json()["status"] == "approved"
+    assert reviewed.json()["reviewed_at"] is not None  # the approval moment, stamped on decision
 
     stats2 = (await client.get("/api/curation/stats")).json()
     assert stats2["approved"] == 1 and stats2["pending"] == 0
@@ -164,6 +165,8 @@ async def test_curation_bulk_review(client: AsyncClient, db_session: AsyncSessio
     listed = (await client.get("/api/curation?status=approved")).json()
     assert all(c["reviewed_by"] == "me" for c in listed["items"])
     assert all(isinstance(c["importance_score"], float) for c in listed["items"])
+    # The bulk path is a raw Core UPDATE — it has to stamp reviewed_at itself.
+    assert all(c["reviewed_at"] is not None for c in listed["items"])
 
 
 async def _seed_article(db: AsyncSession, title="Async Rust", url="https://blog.example.com/rust") -> Article:
@@ -225,6 +228,32 @@ async def test_feed_defaults_to_pending_plus_approved_ranked(client: AsyncClient
     pending = (await client.get("/api/feed?status=pending")).json()
     assert pending["total"] == 1
     assert pending["items"][0]["title"] == "Pending one"
+
+
+@pytest.mark.asyncio
+async def test_feed_orders_by_reviewed_at(client: AsyncClient, db_session: AsyncSession):
+    """The 'recently approved' list: newest decision first, regardless of score."""
+    low = await _seed_article(db_session, title="Approved first", url="https://blog.example.com/first")
+    high = await _seed_article(db_session, title="Approved second", url="https://blog.example.com/second")
+    a = await _seed_curation(db_session, CurationItemType.ARTICLE, low.id, 0.1, status=CurationStatus.PENDING)
+    b = await _seed_curation(db_session, CurationItemType.ARTICLE, high.id, 0.99, status=CurationStatus.PENDING)
+
+    for cur in (a, b):  # a approved before b
+        assert (await client.put(f"/api/curation/{cur.id}/review", json={"status": "approved"})).status_code == 200
+
+    by_score = (await client.get("/api/feed?status=approved")).json()["items"]
+    assert [i["title"] for i in by_score] == ["Approved second", "Approved first"]
+
+    by_review = (await client.get("/api/feed?status=approved&order_by=-reviewed_at")).json()["items"]
+    assert [i["title"] for i in by_review] == ["Approved second", "Approved first"]
+
+    # Same ranking either way above (0.99 approved last), so flip one decision to prove
+    # the ordering really follows reviewed_at and not the score.
+    await client.put(f"/api/curation/{a.id}/review", json={"status": "approved"})
+    flipped = (await client.get("/api/feed?status=approved&order_by=-reviewed_at")).json()["items"]
+    assert [i["title"] for i in flipped] == ["Approved first", "Approved second"]
+
+    assert (await client.get("/api/feed?order_by=-bogus")).status_code == 422
 
 
 @pytest.mark.asyncio

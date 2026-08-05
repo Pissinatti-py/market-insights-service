@@ -1,4 +1,5 @@
 import uuid
+from datetime import datetime, timezone
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, update
@@ -63,7 +64,9 @@ async def bulk_review_curation(
     :rtype: dict
     """
     result = await db.execute(
-        update(Curation).where(Curation.id.in_(body.ids)).values(status=body.status, reviewed_by=body.reviewed_by)
+        update(Curation)
+        .where(Curation.id.in_(body.ids))
+        .values(status=body.status, reviewed_by=body.reviewed_by, reviewed_at=datetime.now(timezone.utc))
     )
     await db.commit()
     return {"updated": result.rowcount}
@@ -76,7 +79,11 @@ async def review_curation(
     db: AsyncSession = Depends(get_db_async_session),
 ) -> CurationRead:
     """Manually approve/reject a curation result."""
-    updated = await _repo.update(db, curation_id, {"status": body.status, "reviewed_by": body.reviewed_by})
+    updated = await _repo.update(
+        db,
+        curation_id,
+        {"status": body.status, "reviewed_by": body.reviewed_by, "reviewed_at": datetime.now(timezone.utc)},
+    )
     if updated is None:
         raise HTTPException(status_code=404, detail="curation not found")
     return CurationRead.model_validate(updated)

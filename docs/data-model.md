@@ -77,8 +77,8 @@ points into one of the three source tables — there is deliberately no DB-level
 | `importance_score` | Numeric(4,3) | 0–1 relevance to the profile (indexed — list default sort). |
 | `status` | enum | `pending \| approved \| rejected` (manual review). |
 | `reviewed_by` | text | Who reviewed it. |
+| `reviewed_at` | timestamptz | When a human approved/rejected it (indexed; null while pending). Not `updated_at` — `recurate_all` bumps that while preserving the decision. |
 | `model` | text | Ollama model that produced it. |
-| `confidence` | Numeric(4,3) | Baseline `0.85` for LLM rows; a "needs review" filter can target anything below. |
 | `raw_llm_output` | JSONB | The unmodified model JSON, kept for debugging. |
 
 **`UNIQUE(item_type, item_id)`** — an item is curated at most once; this is what

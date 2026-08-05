@@ -18,4 +18,5 @@ class FeedItem(BaseModel):
     tags: list[str]
     importance_score: float | None  # JSON number, not Decimal's string rendering
     status: CurationStatus
+    reviewed_at: datetime | None = None  # when a human approved/rejected it; null while pending
     created_at: datetime
