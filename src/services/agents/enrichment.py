@@ -15,14 +15,13 @@ from src.models.curation import CurationItemType
 from src.services.tools import article_reader
 
 
-def build_context(item_type: CurationItemType, item, session) -> str:
+def build_context(item_type: CurationItemType, item) -> str:
     """
     Build the extra-context block for one item.
 
     :param item_type: Which entity ``item`` is.
     :type item_type: CurationItemType
     :param item: The ORM row (Article, Repository, or LibraryRelease).
-    :param session: Open sync DB session (unused; kept for call-site stability).
     :return: The context text, or ``""`` when nothing useful was gathered.
     :rtype: str
     """
