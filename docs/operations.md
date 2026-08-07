@@ -67,7 +67,16 @@ make downgrade                        # alembic downgrade -1
 ```
 
 Versions live in `src/migrations/versions/`; baseline is
-`20260630120000_baseline.py`.
+`20260805164116_baseline_schema.py`, which creates the whole schema as explicit
+`op.*` calls.
+
+> A migration must describe a fixed point in time. Never write one against
+> `Base.metadata` (`create_all`) — it would replay whatever the models look like
+> *when it runs*, so later revisions collide with tables it already created and
+> `alembic upgrade head` breaks on a fresh database.
+> `tests/integration/test_migrations.py` guards this: it runs the chain on an
+> empty DB and fails if autogenerate still finds a diff against the models. Run
+> it after every model change.
 
 ## Tests
 
