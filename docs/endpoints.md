@@ -22,7 +22,7 @@ endpoints hide soft-deleted rows (`deleted_at IS NULL`).
 
 | Method | Path | Notes |
 |---|---|---|
-| GET | `/api/repositories` | List stored repos. `order_by` default `-relevance_score`. Returns `Page<RepositoryRead>`. |
+| GET | `/api/repositories` | List stored repos. `order_by` is one of `-relevance_score` (default), `-stars`, `-created_at`, `name` — anything else is a `422`. Returns `Page<RepositoryRead>`. |
 | GET | `/api/repositories/{repository_id}` | One repo by UUID. `404` if missing/deleted. |
 | GET | `/api/repositories/{repository_id}/momentum` | Star-growth from snapshot history: snapshots in the window (oldest first) + newest-minus-oldest `stars_delta` / `velocity_delta`. `days` 1–365, default 30. |
 | POST | `/api/repositories/search` | **Live** GitHub query with explicit filters; ranked results, **not persisted**. |

@@ -104,3 +104,5 @@ schedule is in `src/core/celery/schedules.py`.
   replays whatever the models look like when it runs and collides with later revisions on a fresh DB.
   After any model change run `tests/integration/test_migrations.py`: it applies the chain to an empty
   database and fails if autogenerate still sees a diff.
+- **`order_by` from a request is a `Literal`**, never a free string — `BaseManager._order_columns`
+  raises on an unknown field so a typo can't silently degrade to insertion order.

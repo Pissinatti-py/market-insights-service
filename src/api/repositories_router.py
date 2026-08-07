@@ -1,5 +1,6 @@
 import uuid
 from datetime import datetime, timedelta, timezone
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,7 +25,9 @@ _repo = RepositoryRepository()
 async def list_repositories(
     page: int = Query(1, ge=1),
     per_page: int = Query(20, ge=1, le=100),
-    order_by: str = Query("-relevance_score"),
+    # Literal, not a free string: an unknown field would otherwise be dropped silently
+    # and the list would come back in insertion order looking like a success.
+    order_by: Literal["-relevance_score", "-stars", "-created_at", "name"] = Query("-relevance_score"),
     db: AsyncSession = Depends(get_db_async_session),
 ) -> Page[RepositoryRead]:
     """List stored trending repositories, most relevant first."""

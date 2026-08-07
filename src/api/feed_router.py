@@ -68,8 +68,8 @@ async def feed(
     min_score: float | None = Query(None, ge=0, le=1),
     tag: str | None = Query(None, description="Exact tag match (lowercase)"),
     since: datetime | None = Query(None, description="Only items curated on/after this moment"),
-    # Literal, not a free string: BaseManager silently skips unknown order fields, so a
-    # typo would quietly fall back to insertion order instead of erroring.
+    # Literal, not a free string: a bad value is a 422 here rather than a ValueError
+    # deeper down in BaseManager._order_columns.
     order_by: Literal["-importance_score", "-reviewed_at", "-created_at"] = Query("-importance_score"),
     db: AsyncSession = Depends(get_db_async_session),
 ) -> Page[FeedItem]:

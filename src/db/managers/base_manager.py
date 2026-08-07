@@ -116,7 +116,14 @@ class BaseManager(Generic[ModelType]):
         return result.scalar_one_or_none()
 
     def _order_columns(self, order_by: Optional[str]) -> List[ColumnElement]:
-        """Translate an ``order_by`` spec (``"-created_at,id"``) into columns. Unknown fields are skipped."""
+        """
+        Translate an ``order_by`` spec (``"-created_at,id"``) into columns.
+
+        :raises ValueError: If a field doesn't exist on the model. Skipping it
+            silently would return rows in insertion order while reporting success;
+            callers taking ``order_by`` from a request constrain it with a
+            ``Literal`` so a bad value is a 422 before it ever reaches here.
+        """
         columns: List[ColumnElement] = []
         if not order_by:
             return columns
@@ -126,9 +133,10 @@ class BaseManager(Generic[ModelType]):
                 continue
             descending = token.startswith("-")
             field_name = token[1:] if descending else token
-            if hasattr(self.model, field_name):
-                field = getattr(self.model, field_name)
-                columns.append(field.desc() if descending else field.asc())
+            if not hasattr(self.model, field_name):
+                raise ValueError(f"unknown order field {field_name!r} for {self.model.__name__}")
+            field = getattr(self.model, field_name)
+            columns.append(field.desc() if descending else field.asc())
         return columns
 
     async def get_multi(
