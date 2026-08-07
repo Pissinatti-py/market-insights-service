@@ -3,12 +3,15 @@
 import uuid
 from datetime import datetime, timedelta, timezone
 
+import httpx
 import pytest
+import respx
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.models.article import Article, ArticleSource
 from src.models.curation import Curation, CurationItemType, CurationStatus
+from src.models.library import Library, LibraryRelease, PackageEcosystem
 from src.models.repository import Repository, RepositorySnapshot
 
 
@@ -306,3 +309,184 @@ async def test_root_serves_review_ui(client: AsyncClient):
     assert resp.status_code == 200
     assert "text/html" in resp.headers["content-type"]
     assert "Radar" in resp.text
+
+
+@pytest.mark.asyncio
+async def test_digest_windows_and_renders(client: AsyncClient, db_session: AsyncSession):
+    repo = await _seed_repo(db_session)
+    fresh = await _seed_article(db_session, title="This week", url="https://blog.example.com/week")
+    stale = await _seed_article(db_session, title="Last month", url="https://blog.example.com/month")
+    low = await _seed_article(db_session, title="Marginal", url="https://blog.example.com/low")
+
+    await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, fresh.id, 0.8)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, low.id, 0.2)
+    old = await _seed_curation(db_session, CurationItemType.ARTICLE, stale.id, 0.95)
+    old.created_at = datetime.now(timezone.utc) - timedelta(days=30)
+    await db_session.commit()
+
+    body = (await client.get("/api/feed/digest?days=7")).json()
+    assert [i["title"] for i in body["items"]] == ["octo/widget", "This week", "Marginal"]
+
+    assert [i["title"] for i in (await client.get("/api/feed/digest?days=7&min_score=0.5")).json()["items"]] == [
+        "octo/widget",
+        "This week",
+    ]
+    assert len((await client.get("/api/feed/digest?days=90")).json()["items"]) == 4  # window opens up
+
+    md = await client.get("/api/feed/digest?days=7&format=markdown")
+    assert "text/markdown" in md.headers["content-type"]
+    assert "# Insights — last 7 days" in md.text
+    assert "## Repositories" in md.text and "## Articles" in md.text
+    assert "[This week](https://blog.example.com/week)" in md.text
+    assert "score 0.90" in md.text
+    assert "Last month" not in md.text  # outside the window
+
+
+@pytest.mark.asyncio
+async def test_feed_renders_library_releases(client: AsyncClient, db_session: AsyncSession):
+    """A release shows up as '<library> <version>' — the third render branch."""
+    library = Library(dedup_key="pypi:fastapi", ecosystem=PackageEcosystem.PYPI, name="fastapi")
+    db_session.add(library)
+    await db_session.commit()
+    await db_session.refresh(library)
+    release = LibraryRelease(
+        dedup_key="pypi:fastapi:2.0.0",
+        library_id=library.id,
+        previous_version="1.0.0",
+        new_version="2.0.0",
+        is_major=True,
+        released_at=datetime.now(timezone.utc),
+    )
+    db_session.add(release)
+    await db_session.commit()
+    await db_session.refresh(release)
+    await _seed_curation(db_session, CurationItemType.LIBRARY_RELEASE, release.id, 0.85)
+
+    item = (await client.get("/api/feed?item_type=library_release")).json()["items"][0]
+    assert item["title"] == "fastapi 2.0.0"
+    assert item["url"] is None  # releases carry no canonical link
+
+    md = (await client.get("/api/feed/digest?format=markdown")).text
+    assert "## Releases" in md
+    assert "- **fastapi 2.0.0** —" in md  # no link markup when there is no url
+
+
+@pytest.mark.asyncio
+async def test_missing_rows_are_404s(client: AsyncClient):
+    ghost = uuid.uuid4()
+    assert (await client.put(f"/api/curation/{ghost}/review", json={"status": "approved"})).status_code == 404
+    assert (await client.delete(f"/api/libraries/{ghost}")).status_code == 404
+    assert (await client.get(f"/api/libraries/{ghost}")).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_curation_list_filters_by_item_type(client: AsyncClient, db_session: AsyncSession):
+    repo = await _seed_repo(db_session)
+    article = await _seed_article(db_session)
+    await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, article.id, 0.4)
+
+    listed = (await client.get("/api/curation?item_type=article")).json()
+    assert listed["total"] == 1 and listed["items"][0]["item_type"] == "article"
+
+
+@pytest.mark.asyncio
+async def test_tasks_are_discoverable(client: AsyncClient):
+    listed = (await client.get("/api/tasks")).json()
+    assert "collect_trending" in listed
+    assert listed["collect_trending"] == "src.tasks.github_tasks.collect_trending"
+
+
+@pytest.mark.asyncio
+async def test_digest_empty_window_still_renders(client: AsyncClient):
+    assert (await client.get("/api/feed/digest")).json()["items"] == []
+    assert "Nothing curated in this window" in (await client.get("/api/feed/digest?format=markdown")).text
+
+
+@pytest.mark.asyncio
+async def test_repositories_reject_unknown_order_field(client: AsyncClient, db_session: AsyncSession):
+    """An unknown sort field is a 422 — never a silently unordered list."""
+    await _seed_repo(db_session)
+    assert (await client.get("/api/repositories?order_by=bogus")).status_code == 422
+    assert (await client.get("/api/repositories?order_by=-stars")).status_code == 200
+
+
+@pytest.mark.asyncio
+async def test_repository_live_search(client: AsyncClient):
+    """The live GitHub probe returns ranked, unpersisted rows."""
+    payload = {
+        "items": [
+            {
+                "full_name": "acme/tool",
+                "owner": {"login": "acme"},
+                "name": "tool",
+                "description": "an llm agent",
+                "stargazers_count": 900,
+                "forks_count": 3,
+                "topics": ["llm"],
+                "language": "Python",
+                "html_url": "https://github.com/acme/tool",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+    }
+    with respx.mock:
+        respx.get("https://api.github.com/search/repositories").mock(return_value=httpx.Response(200, json=payload))
+        resp = await client.post("/api/repositories/search", json={"languages": ["python"], "keywords": ["llm"]})
+
+    assert resp.status_code == 200
+    assert [r["dedup_key"] for r in resp.json()] == ["acme/tool"]
+    # Nothing was persisted — this endpoint only probes.
+    assert (await client.get("/api/repositories")).json()["total"] == 0
+
+
+@pytest.mark.asyncio
+async def test_articles_search_and_get(client: AsyncClient, db_session: AsyncSession):
+    article = await _seed_article(db_session, title="Async Rust", url="https://blog.example.com/rust")
+    article.author = "Jane Roe"
+    article.content = "a deep dive into tokio"
+    other = await _seed_article(db_session, title="Postgres tips", url="https://blog.example.com/pg")
+    await db_session.commit()
+
+    by_title = (await client.get("/api/articles/search?q=rust")).json()
+    assert [a["title"] for a in by_title] == ["Async Rust"]
+    assert [a["title"] for a in (await client.get("/api/articles/search?q=jane")).json()] == ["Async Rust"]
+    assert [a["title"] for a in (await client.get("/api/articles/search?q=tokio")).json()] == ["Async Rust"]
+    assert (await client.get("/api/articles/search?q=nothing-matches")).json() == []
+
+    assert (await client.get(f"/api/articles/{other.id}")).json()["title"] == "Postgres tips"
+    assert (await client.get(f"/api/articles/{uuid.uuid4()}")).status_code == 404
+    assert (await client.get("/api/articles")).json()["total"] == 2
+
+
+@pytest.mark.asyncio
+async def test_library_history_and_remonitoring(client: AsyncClient, db_session: AsyncSession):
+    created = (await client.post("/api/libraries", json={"ecosystem": "pypi", "name": "fastapi"})).json()
+    lib_id = created["id"]
+
+    now = datetime.now(timezone.utc)
+    for version, released in (("1.0.0", now - timedelta(days=30)), ("2.0.0", now)):
+        db_session.add(
+            LibraryRelease(
+                dedup_key=f"pypi:fastapi:{version}",
+                library_id=uuid.UUID(lib_id),
+                new_version=version,
+                is_major=version.startswith("2"),
+                released_at=released,
+            )
+        )
+    await db_session.commit()
+
+    history = (await client.get(f"/api/libraries/{lib_id}")).json()
+    assert [r["new_version"] for r in history] == ["2.0.0", "1.0.0"]  # newest release first
+
+    # Un-monitoring is a soft delete: re-adding the same library revives that row
+    # (same id) rather than creating a second one, so the history survives.
+    assert (await client.delete(f"/api/libraries/{lib_id}")).status_code == 204
+    assert (await client.get(f"/api/libraries/{lib_id}")).status_code == 404
+
+    revived = (await client.post("/api/libraries", json={"ecosystem": "pypi", "name": "fastapi"})).json()
+    assert revived["id"] == lib_id
+    assert revived["is_monitored"] is True
+    assert len((await client.get(f"/api/libraries/{lib_id}")).json()) == 2
