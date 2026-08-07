@@ -1,10 +1,7 @@
 FROM python:3.13-slim
 
-RUN apt-get update && apt-get install -y \
-    build-essential \
-    libpq-dev \
-    && rm -rf /var/lib/apt/lists/*
-
+# No build toolchain: every dependency resolves to a cp313 manylinux wheel
+# (psycopg2-binary and asyncpg bundle libpq), so nothing compiles from source.
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
 WORKDIR /app
@@ -31,4 +28,6 @@ ENV PYTHONPATH=/app
 # No ENTRYPOINT in the image — the standalone compose opts into the migrate-on-boot
 # bootstrap via scripts/docker-entrypoint.sh, keeping the image itself a plain
 # uvicorn CMD so it can be embedded in another stack unchanged.
-CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8003", "--reload"]
+# No --reload here either: that is a dev-loop flag, and docker-compose.yml adds it
+# back via its own `command:` for local work.
+CMD ["uvicorn", "src.main:app", "--host", "0.0.0.0", "--port", "8003"]
