@@ -8,10 +8,11 @@ never surface unless explicitly requested via ``?status=``.
 """
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Query
+from fastapi.responses import PlainTextResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.future import select
 
@@ -57,6 +58,33 @@ async def _render_items(
     return rendered
 
 
+def _to_feed_items(curations: list[Curation], rendered: dict) -> list[FeedItem]:
+    """Join curation rows with their rendered titles/urls, dropping orphans."""
+    items = []
+    for cur in curations:
+        hit = rendered.get((cur.item_type, cur.item_id))
+        if hit is None:
+            # Orphan curation (item hard-deleted) — nothing to show.
+            continue
+        title, url = hit
+        items.append(
+            FeedItem(
+                curation_id=cur.id,
+                item_type=cur.item_type,
+                item_id=cur.item_id,
+                title=title,
+                url=url,
+                summary=cur.summary,
+                tags=cur.tags,
+                importance_score=cur.importance_score,
+                status=cur.status,
+                reviewed_at=cur.reviewed_at,
+                created_at=cur.created_at,
+            )
+        )
+    return items
+
+
 @router.get("", response_model=Page[FeedItem])
 async def feed(
     page: int = Query(1, ge=1),
@@ -95,28 +123,70 @@ async def feed(
         expressions=expressions,
         order_by=order_by,
     )
-    rendered = await _render_items(db, result.items)
+    items = _to_feed_items(result.items, await _render_items(db, result.items))
+    return Page.from_result(result, items=items)
 
-    items = []
-    for cur in result.items:
-        hit = rendered.get((cur.item_type, cur.item_id))
-        if hit is None:
-            # Orphan curation (item hard-deleted) — nothing to show.
+
+#: Markdown digest sections, in reading order.
+_SECTIONS = (
+    (CurationItemType.REPOSITORY, "Repositories"),
+    (CurationItemType.LIBRARY_RELEASE, "Releases"),
+    (CurationItemType.ARTICLE, "Articles"),
+)
+
+
+def _render_markdown(items: list[FeedItem], days: int) -> str:
+    """Render the digest as Markdown, grouped by item type, ready to paste anywhere."""
+    lines = [f"# Insights — last {days} days", ""]
+    for item_type, heading in _SECTIONS:
+        group = [i for i in items if i.item_type == item_type]
+        if not group:
             continue
-        title, url = hit
-        items.append(
-            FeedItem(
-                curation_id=cur.id,
-                item_type=cur.item_type,
-                item_id=cur.item_id,
-                title=title,
-                url=url,
-                summary=cur.summary,
-                tags=cur.tags,
-                importance_score=cur.importance_score,
-                status=cur.status,
-                reviewed_at=cur.reviewed_at,
-                created_at=cur.created_at,
-            )
-        )
+        lines += [f"## {heading}", ""]
+        for item in group:
+            title = f"[{item.title}]({item.url})" if item.url else item.title
+            meta = [] if item.importance_score is None else [f"score {item.importance_score:.2f}"]
+            if item.tags:
+                meta.append(", ".join(item.tags))
+            suffix = f" _({' · '.join(meta)})_" if meta else ""
+            lines.append(f"- **{title}** — {item.summary or 'no summary yet'}{suffix}")
+        lines.append("")
+    if len(lines) == 2:
+        lines.append("_Nothing curated in this window._")
+    return "\n".join(lines).rstrip() + "\n"
+
+
+# NOTE: no /{param} route exists on this router today, but keep /digest above any
+# future one so it isn't captured as a path parameter.
+@router.get("/digest", response_model=None)
+async def digest(
+    days: int = Query(7, ge=1, le=90, description="Window ending now, measured on curation time"),
+    min_score: float | None = Query(None, ge=0, le=1),
+    limit: int = Query(20, ge=1, le=100),
+    format: Literal["json", "markdown"] = Query("json"),
+    db: AsyncSession = Depends(get_db_async_session),
+) -> Page[FeedItem] | PlainTextResponse:
+    """
+    The period digest: what was worth knowing in the last ``days``, best first.
+
+    Same rows and same shape as ``/api/feed`` (pending + approved, ranked by
+    importance) narrowed to a time window — ``format=markdown`` renders them as a
+    ready-to-publish document instead of JSON.
+    """
+    expressions = [Curation.created_at >= datetime.now(timezone.utc) - timedelta(days=days)]
+    if min_score is not None:
+        expressions.append(Curation.importance_score >= min_score)
+
+    result = await _curation.paginate(
+        db,
+        page=1,
+        per_page=limit,
+        filters={"status": [CurationStatus.PENDING, CurationStatus.APPROVED]},
+        expressions=expressions,
+        order_by="-importance_score",
+    )
+    items = _to_feed_items(result.items, await _render_items(db, result.items))
+
+    if format == "markdown":
+        return PlainTextResponse(_render_markdown(items, days), media_type="text/markdown; charset=utf-8")
     return Page.from_result(result, items=items)

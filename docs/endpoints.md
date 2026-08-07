@@ -67,6 +67,7 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/feed` | Unified curated feed across repos, releases, and articles — curation joined with a render of its item (`title`, `url`), most important first. `Page<FeedItem>`. |
+| GET | `/api/feed/digest` | The last `days` (default 7) of the same feed, best first — `format=markdown` renders it as a document. |
 
 Filters: `status` (default **pending + approved**; `rejected`/`failed` only when
 asked for explicitly), `item_type`, `min_score` (0–1), `tag` (exact lowercase
@@ -76,6 +77,21 @@ silently skipped.
 Ordering: `order_by` — one of `-importance_score` (default), `-reviewed_at`,
 `-created_at`; anything else is `422`. `?status=approved&order_by=-reviewed_at`
 is the "recently approved" list the review UI renders under the feed.
+
+### Digest
+
+`GET /api/feed/digest?days=7&min_score=&limit=20&format=json|markdown`
+
+The period summary: pending + approved curations from the last `days` (1–90,
+measured on curation time), ranked by importance, capped at `limit` (1–100).
+`format=json` returns the same `Page<FeedItem>` as `/api/feed`, so clients need no
+extra model; `format=markdown` returns `text/markdown` grouped under
+`## Repositories / ## Releases / ## Articles` — paste-ready for a newsletter or a
+weekly note.
+
+```bash
+curl "localhost:8003/api/feed/digest?days=7&min_score=0.6&format=markdown"
+```
 
 ## Tasks — `/api/tasks`
 
