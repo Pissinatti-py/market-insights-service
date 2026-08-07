@@ -47,6 +47,20 @@ class PreferenceRead(BaseModel):
         return not (self.stacks or self.areas or self.keywords)
 
 
+class KeywordSuggestion(BaseModel):
+    """
+    A candidate search term mined from review decisions (``GET /api/config/keyword-suggestions``).
+
+    ``net`` ranks them: a tag that shows up as often in rejections as in approvals
+    discriminates nothing and is not worth searching for.
+    """
+
+    keyword: str
+    approved_count: int
+    rejected_count: int
+    net: int
+
+
 class SourcesConfig(BaseModel):
     """Configure which collectors are enabled (``POST /api/config/sources``)."""
 

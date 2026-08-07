@@ -185,12 +185,14 @@ async def _seed_article(db: AsyncSession, title="Async Rust", url="https://blog.
     return article
 
 
-async def _seed_curation(db: AsyncSession, item_type, item_id, score, status=CurationStatus.APPROVED) -> Curation:
+async def _seed_curation(
+    db: AsyncSession, item_type, item_id, score, status=CurationStatus.APPROVED, tags=None
+) -> Curation:
     cur = Curation(
         item_type=item_type,
         item_id=item_id,
         summary=f"summary {score}",
-        tags=["x"],
+        tags=["x"] if tags is None else tags,
         importance_score=score,
         status=status,
     )
@@ -527,3 +529,27 @@ async def test_curation_calibration_without_both_sides_has_no_separation(client:
     assert body["approved_mean_score"] == pytest.approx(0.9)
     assert body["rejected_mean_score"] is None
     assert body["separation"] is None
+
+
+@pytest.mark.asyncio
+async def test_keyword_suggestions_rank_by_net_and_skip_known_terms(client: AsyncClient, db_session: AsyncSession):
+    repo = await _seed_repo(db_session)
+    kept = await _seed_article(db_session, title="Kept", url="https://blog.example.com/kept")
+    dropped = await _seed_article(db_session, title="Dropped", url="https://blog.example.com/dropped")
+
+    await client.put("/api/config/preferences", json={"keywords": ["Rust"], "stacks": ["python"]})
+
+    # "rust"/"python" are already in the profile; "async" nets 0 (approved once, rejected once).
+    await _seed_curation(
+        db_session, CurationItemType.REPOSITORY, repo.id, 0.9, CurationStatus.APPROVED, tags=["wasm", "rust", "async"]
+    )
+    await _seed_curation(
+        db_session, CurationItemType.ARTICLE, kept.id, 0.8, CurationStatus.APPROVED, tags=["wasm", "python"]
+    )
+    await _seed_curation(
+        db_session, CurationItemType.ARTICLE, dropped.id, 0.2, CurationStatus.REJECTED, tags=["async", "seo"]
+    )
+
+    body = (await client.get("/api/config/keyword-suggestions")).json()
+    assert [s["keyword"] for s in body] == ["wasm"]
+    assert body[0] == {"keyword": "wasm", "approved_count": 2, "rejected_count": 0, "net": 2}

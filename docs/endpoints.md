@@ -111,10 +111,15 @@ curl "localhost:8003/api/feed/digest?days=7&min_score=0.6&format=markdown"
 | GET | `/api/config/preferences` | Read the technical profile (creates an empty singleton on first read). |
 | PUT | `/api/config/preferences` | **Partial** update (only provided fields change): `stacks`, `areas`, `keywords`, `monitored_libraries`. |
 | POST | `/api/config/sources` | Set collector toggles. Body: `{enabled_sources: {github: true, articles: false, ...}}`. Keys are validated — anything outside `github`/`packages`/`articles` is a `422`. |
+| GET | `/api/config/keyword-suggestions` | Candidate keywords mined from approved items' tags, minus what the profile already has, ranked by `net` (approvals − rejections, kept only when positive). `?limit=` default 15. Read-only — apply one with `PUT /api/config/preferences`. |
 
 Field routing (also documented in the OpenAPI schema): `stacks` → GitHub language
 filters · `keywords` → GitHub search + article tags · `areas` → article tags ·
 `monitored_libraries` → `ecosystem:name` release polling.
+
+Suggestions are never auto-applied: the scoring loop already learns from your reviews,
+and letting it also rewrite the collectors' search terms would let the feed narrow with
+nothing in the way.
 
 These edits change what the next collector run searches for and which collectors
 run — see [flows.md](flows.md#steering-future-runs).
