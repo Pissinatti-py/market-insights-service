@@ -73,3 +73,29 @@ class CurationStats(BaseModel):
     approved: int
     rejected: int
     failed: int
+
+
+class CalibrationBand(BaseModel):
+    """How one score band fared under human review."""
+
+    band: str
+    approved: int
+    rejected: int
+    #: Share of reviewed items in this band that were kept. ``None`` when the band is empty.
+    approval_rate: float | None
+
+
+class CurationCalibration(BaseModel):
+    """
+    Whether the LLM's scores agree with the human verdict (``GET /api/curation/calibration``).
+
+    ``separation`` is the headline number: how much higher the model scored what was
+    approved than what was rejected. It should widen as review feedback accumulates
+    into the prompt; a value near zero means the score is not discriminating at all.
+    """
+
+    reviewed: int
+    approved_mean_score: float | None
+    rejected_mean_score: float | None
+    separation: float | None
+    bands: list[CalibrationBand]

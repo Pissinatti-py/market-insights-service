@@ -5,11 +5,18 @@ from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import func, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.db.managers.curation_manager import CurationRepository
+from src.db.managers.curation_manager import SCORE_BANDS, CurationRepository
 from src.db.session import get_db_async_session
 from src.models.curation import Curation, CurationItemType, CurationStatus
 from src.schemas.common import Page
-from src.schemas.curation_schema import CurationBulkReview, CurationRead, CurationReview, CurationStats
+from src.schemas.curation_schema import (
+    CalibrationBand,
+    CurationBulkReview,
+    CurationCalibration,
+    CurationRead,
+    CurationReview,
+    CurationStats,
+)
 
 router = APIRouter(prefix="/curation", tags=["Curation"])
 _repo = CurationRepository()
@@ -47,6 +54,45 @@ async def curation_stats(db: AsyncSession = Depends(get_db_async_session)) -> Cu
         approved=counts.get(CurationStatus.APPROVED, 0),
         rejected=counts.get(CurationStatus.REJECTED, 0),
         failed=counts.get(CurationStatus.FAILED, 0),
+    )
+
+
+# NOTE: before /{curation_id}, same reason as /stats.
+@router.get("/calibration", response_model=CurationCalibration)
+async def curation_calibration(db: AsyncSession = Depends(get_db_async_session)) -> CurationCalibration:
+    """
+    How well the LLM's importance score predicts your review decisions.
+
+    Only reviewed, scored rows count. ``separation`` (mean score of approved minus
+    mean score of rejected) is the number to watch: it should widen as review
+    feedback feeds back into the curation prompt. Near zero means the score is not
+    discriminating and the feed is effectively unranked for you.
+    """
+    means, counts = await _repo.calibration(db)
+
+    bands = []
+    for label, _ in SCORE_BANDS:
+        approved = counts.get((label, CurationStatus.APPROVED), 0)
+        rejected = counts.get((label, CurationStatus.REJECTED), 0)
+        total = approved + rejected
+        bands.append(
+            CalibrationBand(
+                band=label,
+                approved=approved,
+                rejected=rejected,
+                approval_rate=(approved / total) if total else None,
+            )
+        )
+
+    approved_mean = means.get(CurationStatus.APPROVED)
+    rejected_mean = means.get(CurationStatus.REJECTED)
+    return CurationCalibration(
+        reviewed=sum(counts.values()),
+        approved_mean_score=approved_mean,
+        rejected_mean_score=rejected_mean,
+        # Only meaningful with both sides present — one-sided means have nothing to compare.
+        separation=(approved_mean - rejected_mean) if approved_mean is not None and rejected_mean is not None else None,
+        bands=bands,
     )
 
 

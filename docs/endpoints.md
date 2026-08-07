@@ -58,9 +58,10 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 |---|---|---|
 | GET | `/api/curation` | List curation results, most important first. Optional `status=pending\|approved\|rejected\|failed`. `Page<CurationRead>`. |
 | GET | `/api/curation/stats` | Aggregate counts: `{total, pending, approved, rejected, failed}`. |
+| GET | `/api/curation/calibration` | Does the score match your verdicts? `{reviewed, approved_mean_score, rejected_mean_score, separation, bands[]}` over reviewed, scored rows only. `separation` = approved mean − rejected mean; `null` until both sides exist. Per-band `approval_rate` is `null` for an empty band (not `0.0`). |
 | PUT | `/api/curation/{curation_id}/review` | Approve/reject. Body: `{status, reviewed_by}`. Stamps `reviewed_at`. `404` if missing. |
 
-> `/stats` is declared before `/{curation_id}` for the same reason as above.
+> `/stats` and `/calibration` are declared before `/{curation_id}` for the same reason as above.
 
 ## Feed — `/api/feed`
 

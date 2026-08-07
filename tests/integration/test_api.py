@@ -490,3 +490,40 @@ async def test_library_history_and_remonitoring(client: AsyncClient, db_session:
     assert revived["id"] == lib_id
     assert revived["is_monitored"] is True
     assert len((await client.get(f"/api/libraries/{lib_id}")).json()) == 2
+
+
+@pytest.mark.asyncio
+async def test_curation_calibration_separates_approved_from_rejected(client: AsyncClient, db_session: AsyncSession):
+    """The headline metric: did the model score what you kept above what you dropped?"""
+    repo = await _seed_repo(db_session)
+    kept = await _seed_article(db_session, title="Kept", url="https://blog.example.com/kept")
+    dropped = await _seed_article(db_session, title="Dropped", url="https://blog.example.com/dropped")
+    unreviewed = await _seed_article(db_session, title="Pending", url="https://blog.example.com/pending")
+
+    await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9, CurationStatus.APPROVED)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, kept.id, 0.7, CurationStatus.APPROVED)
+    await _seed_curation(db_session, CurationItemType.ARTICLE, dropped.id, 0.3, CurationStatus.REJECTED)
+    # Pending has no verdict to compare a score against — it must not skew the means.
+    await _seed_curation(db_session, CurationItemType.ARTICLE, unreviewed.id, 0.1, CurationStatus.PENDING)
+
+    body = (await client.get("/api/curation/calibration")).json()
+    assert body["reviewed"] == 3
+    assert body["approved_mean_score"] == pytest.approx(0.8)
+    assert body["rejected_mean_score"] == pytest.approx(0.3)
+    assert body["separation"] == pytest.approx(0.5)
+
+    bands = {b["band"]: b for b in body["bands"]}
+    assert bands["0.8-1.0"] == {"band": "0.8-1.0", "approved": 1, "rejected": 0, "approval_rate": 1.0}
+    assert bands["0.0-0.4"] == {"band": "0.0-0.4", "approved": 0, "rejected": 1, "approval_rate": 0.0}
+    assert bands["0.4-0.6"]["approval_rate"] is None  # empty band, not a 0% one
+
+
+@pytest.mark.asyncio
+async def test_curation_calibration_without_both_sides_has_no_separation(client: AsyncClient, db_session: AsyncSession):
+    repo = await _seed_repo(db_session)
+    await _seed_curation(db_session, CurationItemType.REPOSITORY, repo.id, 0.9, CurationStatus.APPROVED)
+
+    body = (await client.get("/api/curation/calibration")).json()
+    assert body["approved_mean_score"] == pytest.approx(0.9)
+    assert body["rejected_mean_score"] is None
+    assert body["separation"] is None
