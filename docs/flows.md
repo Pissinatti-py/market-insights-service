@@ -90,20 +90,22 @@ three item types (articles, repositories, library releases), newest first — no
 type can starve the others:
 
 1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
-2. Interleave rows with **no** curation row yet (`item.id NOT IN
+2. Read **review feedback** once per run: the most recently approved and rejected
+   curations (see "Feeding review decisions back" below).
+3. Interleave rows with **no** curation row yet (`item.id NOT IN
    (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the budget.
-3. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
+4. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
    truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
-4. Render the item (with published/created dates and engagement) and call
-   `curation_agent.curate(text, profile, context)`:
+5. Render the item (with published/created dates and engagement) and call
+   `curation_agent.curate(text, profile, context, feedback)`:
    - POSTs to Ollama `/api/chat` constrained to the `CurationCreate` JSON schema
      (`temperature: 0.1`). The prompt carries a scoring rubric, anchor examples,
-     and today's date (stale news is capped).
+     your past review decisions, and today's date (stale news is capped).
    - Ollama down / timeout / 5xx → `CollectorRetriable` (task retries).
    - Invalid output → `CollectorTerminal`: a **dead-letter row** is written
      (`status=failed`, error in `raw_llm_output`) so the item is never re-selected;
      `recurate_all` is its retry path.
-5. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
+6. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
    the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
 
 Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
@@ -128,8 +130,36 @@ pending + approved) — review is optional grooming, not a gate. A reviewer:
 - `GET /api/curation/stats` — counts by status (including `failed` dead-letters).
 - `PUT /api/curation/{id}/review` — set `approved` / `rejected` (+ `reviewed_by`).
 
-The review status is advisory metadata on the curation row; it does not delete the
-underlying signal.
+Reviewing never deletes the underlying signal — a rejected row keeps its item and
+its curation, it just drops out of the default feed.
+
+## Feeding review decisions back
+
+Approve/reject is not only bookkeeping: it is the training signal for the next run.
+
+**Into the score.** Each curation run loads the most recently reviewed rows
+(`_FEEDBACK_EXAMPLES` per side, default 6) and passes them to the agent, which renders
+them into the prompt as a `REVIEW FEEDBACK` block — the LLM's own summary, tags, and
+score for each item, plus the verdict you gave it. The system prompt tells the model
+this outranks the static anchor examples. Two guards:
+
+- **Both sides or nothing.** Under 2 approved *or* under 2 rejected, the block is
+  dropped entirely — one-sided feedback has no contrast and just pushes every score up.
+- **No self-reference.** An item never receives its own past decision as an example,
+  or `recurate_all` would re-score approved items against themselves and make the
+  calibration report below meaningless.
+
+**Into the score's credibility.** `GET /api/curation/calibration` reports how the
+model's scores line up with your verdicts: mean score of approved vs. rejected, the
+gap between them (`separation`), and approval rate per score band. Only reviewed,
+scored rows count. Separation near zero means the score is not discriminating and the
+feed is effectively unranked for you; it should widen as feedback accumulates. This is
+the number to check before and after a `recurate_all`.
+
+**Into what gets collected.** `GET /api/config/keyword-suggestions` mines tags the LLM
+assigned to approved items, drops the ones already in your profile, and ranks the rest
+by approvals minus rejections (a tag that appears equally in both discriminates
+nothing). It is deliberately read-only — see below.
 
 ## Steering future runs
 
@@ -140,3 +170,10 @@ redeploy needed:
 - `POST /api/config/sources` — flip individual collectors on/off (`enabled_sources`).
 
 Changes take effect on the next scheduled (or manually triggered) run.
+
+Keyword suggestions stop at *suggesting* on purpose. The scoring loop is already
+self-reinforcing — examples come from decisions made under a prompt that used
+examples — so letting it also rewrite the collectors' search terms would let the feed
+narrow with nothing in the way. Applying a suggestion stays a deliberate
+`PUT /api/config/preferences`. If `separation` climbs while the feed visibly gets
+samey, that is the loop over-fitting; widen the profile by hand.

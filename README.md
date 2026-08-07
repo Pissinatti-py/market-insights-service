@@ -30,6 +30,13 @@ Consume the result at **`GET /`** (single-page review UI: ranked feed, filters,
 approve/reject) or **`GET /api/feed`** (same data over JSON, default
 pending + approved).
 
+Approving and rejecting is not just bookkeeping — it feeds back. Each curation run
+passes your most recent decisions to the LLM as examples of your actual taste,
+`GET /api/curation/calibration` reports whether the scores are tracking those
+decisions, and `GET /api/config/keyword-suggestions` mines approved items' tags for
+search terms worth adding to the profile. See
+[docs/flows.md](docs/flows.md) for the guards on that loop.
+
 ## Review UI
 
 One self-contained page (`src/static/index.html`, no build step) served at
@@ -41,7 +48,9 @@ One self-contained page (`src/static/index.html`, no build step) served at
   score reflect the LLM's `importance_score` against your profile.
 - **Filters** for status, item type, minimum score, and tag (click any tag to
   filter by it).
-- **One-click review** (`approve` / `reject`) and live stats per status.
+- **One-click review** (`approve` / `reject`) and live stats per status, including
+  `separation` — how much higher the model scored what you kept than what you dropped.
+- **Suggested keywords** mined from your approvals, for adding to the profile.
 - **Run collectors on demand** from the header — no shell needed.
 
 ## Quick start (Docker)
@@ -96,12 +105,13 @@ the database and edited via `PUT /api/config/preferences` + `POST /api/config/so
 ## Endpoints
 
 `GET /` (review UI); `GET /health`, `GET /status`; `/api/feed` (ranked unified
-feed with `status`/`item_type`/`min_score`/`tag`/`since` filters);
+feed with `status`/`item_type`/`min_score`/`tag`/`since` filters) and
+`/api/feed/digest` (the last N days as JSON or Markdown);
 `/api/repositories` (list/detail/`POST search`); `/api/libraries`
 (list/detail-history/add/remove); `/api/articles` (list/detail/`search`);
-`/api/curation` (list/`stats`/`PUT {id}/review`/bulk review); `/api/tasks`
-(list/`POST {name}/trigger`); `/api/config/preferences` + `/api/config/sources`.
-Full schemas at `/docs`.
+`/api/curation` (list/`stats`/`calibration`/`PUT {id}/review`/bulk review); `/api/tasks`
+(list/`POST {name}/trigger`); `/api/config/preferences` + `/api/config/sources` +
+`/api/config/keyword-suggestions`. Full schemas at `/docs`.
 
 A few more examples:
 
@@ -124,11 +134,29 @@ curl -X PUT http://localhost:8003/api/curation/42/review \
   -H 'content-type: application/json' \
   -d '{"status": "approved"}'
 
+# is the score actually tracking your decisions? (watch `separation` grow)
+curl http://localhost:8003/api/curation/calibration
+
+# search terms your approvals suggest but the profile is missing
+curl http://localhost:8003/api/config/keyword-suggestions
+
 # change what the collectors look for
 curl -X PUT http://localhost:8003/api/config/preferences \
   -H 'content-type: application/json' \
   -d '{"stacks": ["python", "rust"], "keywords": ["llm", "async"]}'
+
+# the week in Markdown — paste it into a newsletter or a note
+curl "http://localhost:8003/api/feed/digest?days=7&min_score=0.6&format=markdown"
 ```
+
+## Security
+
+The API is **unauthenticated by design** — it is meant to run inside a private
+stack (localhost or a trusted network), like the pissync services it mirrors.
+Anyone who can reach the port can trigger collectors and edit the profile, so do
+not expose port 8003 to the internet; put it behind your own gateway or VPN if it
+needs to travel. `GITHUB_TOKEN` lives in `.env`, which is gitignored — only
+`.env.example` is tracked.
 
 ## Testing
 
@@ -142,3 +170,7 @@ uv run pytest --cov=src               # everything + coverage
 
 FastAPI · async SQLAlchemy 2.0 + PostgreSQL · Alembic · Celery + celery-redbeat on
 Redis · httpx · Ollama (LLM) · uv · Docker · pytest + respx · ruff.
+
+## License
+
+[MIT](LICENSE).
