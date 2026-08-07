@@ -10,3 +10,9 @@ __pycache__/
 coverage.xml
 htmlcov/
 *.egg-info/
+
+# Local tooling, not project config: the repo lints with ruff (see pyproject.toml),
+# and graphify-out/ is regenerable knowledge-graph output.
+.vscode/
+.flake8
+graphify-out/

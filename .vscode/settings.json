@@ -1,6 +1,0 @@
-{
-  // This project lints with ruff (line-length 120, see pyproject.toml).
-  // The flake8 extension defaults to 79 chars and duplicates ruff — off here.
-  "flake8.enabled": false,
-  "python.linting.flake8Enabled": false
-}

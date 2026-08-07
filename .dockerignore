@@ -8,3 +8,5 @@ __pycache__
 coverage.xml
 htmlcov
 .env
+.vscode
+graphify-out
