@@ -77,12 +77,16 @@ async def repository_momentum(
 
 
 @router.post("/search", response_model=list[RepositoryRead])
-async def search_repositories(body: RepositorySearch) -> list[RepositoryRead]:
+def search_repositories(body: RepositorySearch) -> list[RepositoryRead]:
     """
     Run a live GitHub search with explicit filters (does not persist).
 
     Lets a caller probe GitHub on demand without waiting for the scheduled
     collector. Results are returned ranked but not stored.
+
+    Deliberately ``def``, not ``async def``: the collector uses a blocking
+    ``httpx.Client`` with a 30 s timeout, which would stall the whole event loop.
+    FastAPI runs sync path operations in a threadpool.
     """
     now = datetime.now(timezone.utc)
     pushed_since = (now - timedelta(days=90)).date().isoformat()
