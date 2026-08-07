@@ -72,3 +72,7 @@ filterwarnings = [
 [tool.coverage.run]
 source = ["src"]
 omit = ["src/migrations/*"]
+# SQLAlchemy's asyncio layer runs ORM work inside greenlets and FastAPI runs sync
+# path operations in a threadpool; without these, every async DB-backed endpoint
+# reports its body as uncovered even though the tests exercise it.
+concurrency = ["greenlet", "thread"]
