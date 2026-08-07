@@ -14,17 +14,13 @@ class Settings(BaseSettings):
     APP_NAME: str = "Market Insights Service"
     APP_VERSION: str = "0.1.0"
     API_PREFIX: str = "/api"
-    DEBUG: bool = True
 
     # CORS
     ALLOWED_ORIGINS: str = "*"
 
-    # Database (this service owns its own Postgres)
-    POSTGRES_USER: str = "postgres"
-    POSTGRES_PASSWORD: str = "postgres"
-    POSTGRES_DB: str = "market_insights"
-    POSTGRES_HOST: str = "db"
-    POSTGRES_PORT: int = 5432
+    # Database (this service owns its own Postgres). The asyncpg URL is the single
+    # source of truth — the sync URL is derived from it in db/session.py. The
+    # POSTGRES_* vars in .env configure the compose container, not the app.
     DATABASE_URL: str = "postgresql+asyncpg://postgres:postgres@db:5432/market_insights"
 
     # Redis + Celery

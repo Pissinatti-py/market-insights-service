@@ -18,18 +18,19 @@ are dropped.
 | `APP_NAME` | `Market Insights Service` | Shown in `/health` + Swagger title. |
 | `APP_VERSION` | `0.1.0` | |
 | `API_PREFIX` | `/api` | Prefix for all domain routers. |
-| `DEBUG` | `true` | |
 | `ALLOWED_ORIGINS` | `*` | CORS. JSON array or comma-separated; empty ⇒ allow all. |
 
 ### Database (this service owns its Postgres)
-| Var | Default |
-|---|---|
-| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `market_insights` |
-| `POSTGRES_HOST` / `POSTGRES_PORT` | `db` / `5432` |
-| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@db:5432/market_insights` |
+| Var | Default | Notes |
+|---|---|---|
+| `DATABASE_URL` | `postgresql+asyncpg://postgres:postgres@db:5432/market_insights` | The only one the app reads. |
+| `POSTGRES_USER` / `POSTGRES_PASSWORD` / `POSTGRES_DB` | `postgres` / `postgres` / `market_insights` | Read by **docker-compose** to provision the container, not by the app. |
 
-> The API uses the async `asyncpg` URL; Celery derives a sync session from the
-> same database. Host port `5434` maps to the container's `5432` (compose).
+> `DATABASE_URL` is the single source of truth for the application: the API uses
+> the async `asyncpg` URL and Celery derives the sync one from it. Changing the
+> `POSTGRES_*` vars alone moves the container's credentials but not where the app
+> connects — change both together. Host port `5434` maps to the container's
+> `5432` (compose).
 
 ### Redis + Celery
 | Var | Default | Notes |
