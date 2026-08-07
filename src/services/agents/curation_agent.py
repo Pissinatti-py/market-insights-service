@@ -46,6 +46,9 @@ _SYSTEM_PROMPT = (
     "- 0.7-0.9: clearly relevant news or release worth reading soon\n"
     "- 0.4-0.7: solid but routine; fine to batch-read later\n"
     "- below 0.4: marginal or noise for this profile\n"
+    "When the user message carries a REVIEW FEEDBACK block, it is ground truth from THIS user — "
+    "real items they kept or discarded. It outranks the generic anchor examples below wherever the "
+    "two disagree; match the taste it shows, not just the topic overlap.\n"
     "Anchor examples (calibrate against these):\n"
     "- 0.95: \"Major framework in the user's stack ships a breaking major release with a "
     'migration guide" — must-see, act soon.\n'
@@ -58,12 +61,51 @@ _SYSTEM_PROMPT = (
 )
 
 
-def _user_prompt(item_text: str, profile: dict, context: str = "") -> str:
-    """Build the per-item user prompt embedding the profile, item, context, and contract."""
+#: Minimum examples on *each* side before feedback is used. One-sided feedback has no
+#: contrast — a wall of approvals just ratchets every score upward — so below this the
+#: block is dropped and the static anchor examples carry the calibration alone.
+_MIN_PER_SIDE = 2
+
+
+def _feedback_block(feedback: list[dict] | None) -> str:
+    """
+    Render past review decisions as few-shot examples of this user's taste.
+
+    Each example is an already-curated item: the LLM's own summary and tags for it,
+    the score it got, and the verdict the human then gave. Returns ``""`` when
+    either side is under :data:`_MIN_PER_SIDE`.
+
+    :param feedback: Dicts with ``decision``/``summary``/``tags``/``score``.
+    :type feedback: list[dict] | None
+    :return: The prompt block, or ``""`` when there is not enough signal.
+    :rtype: str
+    """
+    if not feedback:
+        return ""
+    approved = [f for f in feedback if f["decision"] == "approved"]
+    rejected = [f for f in feedback if f["decision"] == "rejected"]
+    if len(approved) < _MIN_PER_SIDE or len(rejected) < _MIN_PER_SIDE:
+        return ""
+
+    def _lines(rows: list[dict]) -> str:
+        return "\n".join(
+            f"- [{', '.join(r['tags']) or 'no tags'}] {r['summary']} (you scored it {r['score']:.2f})" for r in rows
+        )
+
+    return (
+        "REVIEW FEEDBACK — this user's own past decisions on this same feed:\n"
+        f"APPROVED (kept — score items like these HIGH):\n{_lines(approved)}\n"
+        f"REJECTED (discarded — score items like these LOW):\n{_lines(rejected)}\n\n"
+    )
+
+
+def _user_prompt(item_text: str, profile: dict, context: str = "", feedback: list[dict] | None = None) -> str:
+    """Build the per-item user prompt embedding the profile, feedback, item, context, and contract."""
     extra = f"EXTRA CONTEXT:\n{context}\n\n" if context else ""
     return (
         f"TODAY: {date.today().isoformat()}\n\n"
         f"USER PROFILE (stacks/areas/keywords/monitored_libraries):\n{json.dumps(profile, ensure_ascii=False)}\n\n"
+        f"{_feedback_block(feedback)}"
         f"ITEM:\n{item_text}\n\n"
         f"{extra}"
         "Return a JSON object with exactly these keys:\n"
@@ -73,7 +115,12 @@ def _user_prompt(item_text: str, profile: dict, context: str = "") -> str:
     )
 
 
-def curate(item_text: str, profile: dict, context: str = "") -> tuple[CurationCreate, dict]:
+def curate(
+    item_text: str,
+    profile: dict,
+    context: str = "",
+    feedback: list[dict] | None = None,
+) -> tuple[CurationCreate, dict]:
     """
     Curate one item against the profile.
 
@@ -83,12 +130,14 @@ def curate(item_text: str, profile: dict, context: str = "") -> tuple[CurationCr
     :type profile: dict
     :param context: Optional enrichment (full article body / web coverage / trending).
     :type context: str
+    :param feedback: Past approve/reject decisions, used as few-shot taste examples.
+    :type feedback: list[dict] | None
     :return: ``(validated_curation, raw_model_output)``.
     :rtype: tuple[CurationCreate, dict]
     :raises CollectorRetriable: Ollama unreachable / 5xx (the task retries).
     :raises CollectorTerminal: Output that won't validate after the call.
     """
-    raw = _call_ollama(_SYSTEM_PROMPT, _user_prompt(item_text, profile, context))
+    raw = _call_ollama(_SYSTEM_PROMPT, _user_prompt(item_text, profile, context, feedback))
     return _coerce(raw), raw
 
 

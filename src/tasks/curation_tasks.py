@@ -9,6 +9,9 @@ constraint is tolerated per item (skip, not crash) so a lost race never kills
 the batch or duplicates LLM work for long.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
+Past approve/reject decisions are loaded once per run and passed to the agent as
+few-shot examples, so scoring calibrates against real taste rather than only the
+static anchors in the prompt.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from sqlalchemy.exc import IntegrityError
 from src.core.celery.celery_app import celery_app
 from src.core.conf import settings
 from src.core.exceptions import CollectorRetriable, CollectorTerminal
+from src.db.managers.curation_manager import recent_decisions_sync
 from src.db.managers.preference_manager import get_or_create_sync
 from src.db.session import SyncSession
 from src.models.article import Article
@@ -101,11 +105,43 @@ def _load_profile(session) -> dict:
     }
 
 
-def _curate_one(session, item_type: CurationItemType, item, profile: dict) -> tuple:
+#: Review examples per decision fed to the prompt. A module constant, not a setting:
+#: it is a prompt-budget knob on a single-user service, and tests monkeypatch it here.
+_FEEDBACK_EXAMPLES = 6
+
+
+def _load_feedback(session) -> list[dict]:
+    """
+    Past review decisions as few-shot examples, loaded **once per run**.
+
+    Flat list so the agent stays free of model imports — it only ever sees dicts.
+
+    :param session: Active sync session.
+    :return: Approved then rejected examples, newest decision first.
+    :rtype: list[dict]
+    """
+    decisions = recent_decisions_sync(session, _FEEDBACK_EXAMPLES)
+    return [
+        {
+            "decision": decision,
+            "item_id": cur.item_id,
+            "summary": cur.summary,
+            "tags": cur.tags or [],
+            "score": float(cur.importance_score or 0),
+        }
+        for decision in ("approved", "rejected")
+        for cur in decisions[decision]
+    ]
+
+
+def _curate_one(item_type: CurationItemType, item, profile: dict, feedback: list[dict]) -> tuple:
     """Render → enrich → LLM for one item. Raises ``CollectorTerminal`` on bad output."""
     _, render = _RENDERERS[item_type]
-    context = build_context(item_type, item, session)
-    return curation_agent.curate(render(item), profile, context=context)
+    context = build_context(item_type, item)
+    # Never let an item be its own example: recurate_all re-scores reviewed items, and
+    # feeding one back its own approval would make the calibration report self-fulfilling.
+    examples = [f for f in feedback if f["item_id"] != item.id]
+    return curation_agent.curate(render(item), profile, context=context, feedback=examples)
 
 
 _LOCK_KEY = "mi:lock:curate_uncurated"
@@ -171,10 +207,11 @@ def curate_uncurated(self) -> dict:
     try:
         with SyncSession() as session:
             profile = _load_profile(session)
+            feedback = _load_feedback(session)
 
             for item_type, item in _next_batch(session, settings.CURATION_BATCH_SIZE):
                 try:
-                    result, raw = _curate_one(session, item_type, item, profile)
+                    result, raw = _curate_one(item_type, item, profile, feedback)
                 except CollectorTerminal as exc:
                     logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
                     # Dead-letter: the unique constraint keeps the item out of future
@@ -239,6 +276,9 @@ def recurate_all(self) -> dict:
 
     with SyncSession() as session:
         profile = _load_profile(session)
+        # Snapshot the examples before the sweep so every row is re-scored against the
+        # same reference set — a moving set would make the pass unrepeatable.
+        feedback = _load_feedback(session)
 
         curations = list(session.execute(select(Curation)).scalars().all())
         for cur in curations:
@@ -249,7 +289,7 @@ def recurate_all(self) -> dict:
                 continue
 
             try:
-                result, raw = _curate_one(session, cur.item_type, item, profile)
+                result, raw = _curate_one(cur.item_type, item, profile, feedback)
             except CollectorTerminal as exc:
                 logger.warning(f"recurate: invalid output for {cur.item_type.value}:{cur.item_id}: {exc}")
                 skipped += 1

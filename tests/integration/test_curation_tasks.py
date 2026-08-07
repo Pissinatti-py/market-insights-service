@@ -65,10 +65,10 @@ def _seed_release(session, name: str) -> LibraryRelease:
 @pytest.fixture(autouse=True)
 def _no_enrichment(monkeypatch):
     """Keep the tasks offline — enrichment would fetch article bodies."""
-    monkeypatch.setattr(curation_tasks, "build_context", lambda item_type, item, session: "")
+    monkeypatch.setattr(curation_tasks, "build_context", lambda item_type, item: "")
 
 
-def _ok_curate(item_text, profile, context=""):
+def _ok_curate(item_text, profile, context="", feedback=None):
     return CurationCreate(summary="ok", tags=["x"], importance_score=0.5), {"summary": "ok"}
 
 
@@ -77,7 +77,7 @@ def test_terminal_output_dead_letters_and_is_not_reselected(db_session, monkeypa
         item = _seed_article(session, "Broken output")
         item_id = item.id
 
-    def _boom(item_text, profile, context=""):
+    def _boom(item_text, profile, context="", feedback=None):
         raise CollectorTerminal("bad json")
 
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _boom)
@@ -115,7 +115,7 @@ def test_concurrent_duplicate_insert_does_not_kill_batch(db_session, monkeypatch
         _seed_repo(session, "owner/safe")
         article_ids = [a1.id, a2.id]
 
-    def _racing_curate(item_text, profile, context=""):
+    def _racing_curate(item_text, profile, context="", feedback=None):
         # First call: a concurrent run finishes both articles before our commits land.
         with SyncSession() as session:
             for item_id in article_ids:
@@ -176,6 +176,90 @@ def test_recurate_preserves_review_decisions(db_session, monkeypatch):
         assert approved.summary == "ok"  # AI fields still refreshed
         retried = session.query(Curation).filter(Curation.item_id == dead_id).one()
         assert retried.status == CurationStatus.PENDING  # failed rows go back into review
+
+
+def _seed_reviewed(session, title: str, status: CurationStatus, summary: str) -> Curation:
+    """A past review decision — the material the feedback loop feeds back to the LLM."""
+    article = _seed_article(session, title)
+    row = Curation(
+        item_type=CurationItemType.ARTICLE,
+        item_id=article.id,
+        summary=summary,
+        tags=["tag-" + title],
+        importance_score=0.5,
+        status=status,
+        reviewed_at=datetime.now(timezone.utc),
+        model="old-model",
+    )
+    session.add(row)
+    session.commit()
+    return row
+
+
+def test_review_decisions_reach_the_agent_as_feedback(db_session, monkeypatch):
+    with SyncSession() as session:
+        for i in range(2):
+            _seed_reviewed(session, f"keep-{i}", CurationStatus.APPROVED, f"kept {i}")
+            _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, f"dropped {i}")
+        _seed_article(session, "fresh")
+
+    seen: list[list[dict]] = []
+
+    def _capture(item_text, profile, context="", feedback=None):
+        seen.append(feedback)
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
+    assert curation_tasks.curate_uncurated.apply().get() == {"curated": 1, "failed": 0}
+
+    (feedback,) = seen
+    decisions = sorted(f["decision"] for f in feedback)
+    assert decisions == ["approved", "approved", "rejected", "rejected"]
+    assert {f["summary"] for f in feedback} == {"kept 0", "kept 1", "dropped 0", "dropped 1"}
+
+
+def test_pending_and_unreviewed_rows_are_not_feedback(db_session, monkeypatch):
+    """Only a human verdict counts — a pending row carries no decision to learn from."""
+    with SyncSession() as session:
+        pending = _seed_reviewed(session, "undecided", CurationStatus.PENDING, "no verdict")
+        pending.reviewed_at = None
+        session.commit()
+        _seed_article(session, "fresh")
+
+    seen: list[list[dict]] = []
+
+    def _capture(item_text, profile, context="", feedback=None):
+        seen.append(feedback)
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
+    curation_tasks.curate_uncurated.apply().get()
+    assert seen == [[]]
+
+
+def test_recurate_never_feeds_an_item_its_own_decision(db_session, monkeypatch):
+    """Otherwise every approved item re-scores against itself and the calibration report lies."""
+    with SyncSession() as session:
+        target = _seed_reviewed(session, "self", CurationStatus.APPROVED, "the item itself")
+        _seed_reviewed(session, "keep-other", CurationStatus.APPROVED, "another keeper")
+        for i in range(2):
+            _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, f"dropped {i}")
+        target_item_id = target.item_id
+
+    by_summary: dict[str, list[dict]] = {}
+
+    def _capture(item_text, profile, context="", feedback=None):
+        by_summary[item_text] = feedback
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
+    curation_tasks.recurate_all.apply().get()
+
+    own_run = next(fb for text, fb in by_summary.items() if "'self'" in text)
+    assert target_item_id not in [f["item_id"] for f in own_run]
+    assert "the item itself" not in [f["summary"] for f in own_run]
+    # The other examples still reach it — only the self-reference is dropped.
+    assert "another keeper" in [f["summary"] for f in own_run]
 
 
 def test_batch_round_robins_across_types(db_session, monkeypatch):

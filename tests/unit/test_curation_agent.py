@@ -79,6 +79,58 @@ def test_user_prompt_carries_today_and_full_profile():
     assert "pypi:fastapi" in user_msg
 
 
+def _feedback(approved: int, rejected: int) -> list[dict]:
+    return [
+        {
+            "decision": decision,
+            "item_id": f"{decision}-{i}",
+            "summary": f"{decision} item {i}",
+            "tags": [decision[:3]],
+            "score": 0.5,
+        }
+        for decision, count in (("approved", approved), ("rejected", rejected))
+        for i in range(count)
+    ]
+
+
+@respx.mock
+def test_feedback_block_reaches_the_prompt_with_both_sides():
+    body = '{"summary": "ok", "tags": [], "importance_score": 0.5}'
+    route = respx.post(_OLLAMA).mock(return_value=_ollama_response(body))
+    curation_agent.curate("item", {}, feedback=_feedback(approved=2, rejected=2))
+    user_msg = json.loads(route.calls.last.request.content)["messages"][1]["content"]
+    assert "REVIEW FEEDBACK" in user_msg
+    assert "APPROVED (kept" in user_msg and "REJECTED (discarded" in user_msg
+    assert "approved item 0" in user_msg and "rejected item 1" in user_msg
+    # Feedback belongs with the profile, ahead of the item being judged.
+    assert user_msg.index("REVIEW FEEDBACK") < user_msg.index("ITEM:")
+
+
+@respx.mock
+@pytest.mark.parametrize(
+    "approved,rejected",
+    [(2, 1), (1, 2), (5, 0), (0, 0)],
+    ids=["too-few-rejected", "too-few-approved", "one-sided", "empty"],
+)
+def test_feedback_block_dropped_without_contrast_on_both_sides(approved, rejected):
+    """One-sided feedback has nothing to contrast against — fall back to the static anchors."""
+    body = '{"summary": "ok", "tags": [], "importance_score": 0.5}'
+    route = respx.post(_OLLAMA).mock(return_value=_ollama_response(body))
+    curation_agent.curate("item", {}, feedback=_feedback(approved, rejected))
+    assert "REVIEW FEEDBACK" not in json.loads(route.calls.last.request.content)["messages"][1]["content"]
+
+
+@respx.mock
+def test_system_prompt_ranks_feedback_above_anchors():
+    """Without this the model treats the fictional anchors as equal to real decisions."""
+    body = '{"summary": "ok", "tags": [], "importance_score": 0.5}'
+    route = respx.post(_OLLAMA).mock(return_value=_ollama_response(body))
+    curation_agent.curate("item", {})
+    system_msg = json.loads(route.calls.last.request.content)["messages"][0]["content"]
+    assert "REVIEW FEEDBACK" in system_msg
+    assert "outranks" in system_msg
+
+
 @respx.mock
 def test_curate_rejects_out_of_range_score():
     respx.post(_OLLAMA).mock(return_value=_ollama_response('{"summary": "x", "tags": [], "importance_score": 5}'))
