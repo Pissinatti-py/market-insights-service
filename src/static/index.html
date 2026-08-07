@@ -96,11 +96,15 @@
   #pager button { background: none; border: 1px solid var(--line); color: var(--text); border-radius: 3px; padding: .3rem .8rem; }
   #pager button:disabled { opacity: .35; cursor: default; }
 
-  #approved { margin-top: 2.5rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
-  #approved h2 {
+  #approved, #suggested { margin-top: 2.5rem; padding-top: 1.4rem; border-top: 1px solid var(--line); }
+  #approved h2, #suggested h2 {
     font-family: var(--mono); font-size: .72rem; font-weight: 600; letter-spacing: .12em;
     text-transform: uppercase; color: var(--muted); margin-bottom: .6rem;
   }
+  #suggested .hint { color: var(--muted); font-size: .8rem; margin-bottom: .7rem; }
+  #suggested .hint code { font-family: var(--mono); font-size: .74rem; }
+  #suggested-list { display: flex; flex-wrap: wrap; gap: .4rem; }
+  #suggested-list .n { opacity: .55; margin-left: .35em; }
   #approved-list { list-style: none; padding: 0; }
   #approved-list li {
     display: flex; gap: .8rem; align-items: baseline;
@@ -174,6 +178,16 @@
     <button id="next">next ›</button>
   </div>
 
+  <section id="suggested" hidden>
+    <h2>suggested keywords</h2>
+    <p class="hint">
+      Tags from what you approved that aren't in your profile yet, ranked by approvals minus
+      rejections. Add the useful ones with <code>PUT /api/config/preferences</code> to steer what
+      gets collected — click one to see the items it came from.
+    </p>
+    <div id="suggested-list"></div>
+  </section>
+
   <section id="approved">
     <h2>recently approved</h2>
     <ol id="approved-list"></ol>
@@ -214,11 +228,31 @@ function feedParams() {
 }
 
 async function loadStats() {
-  const s = await (await fetch("/api/curation/stats")).json();
+  const responses = await Promise.all([fetch("/api/curation/stats"), fetch("/api/curation/calibration")]);
+  const [s, cal] = await Promise.all(responses.map((r) => r.json()));
+  // Separation = how much higher the model scored what you kept than what you dropped.
+  // It should widen as review feedback accumulates; null until both sides exist.
+  const sep = cal.separation === null
+    ? ""
+    : `<span title="mean score of approved minus rejected — higher means the ranking matches your taste">` +
+      `<b>${cal.separation.toFixed(2)}</b>separation</span>`;
   $("#stats").innerHTML =
     `<span><b>${s.total}</b>items</span><span><b>${s.pending}</b>pending</span>` +
     `<span><b>${s.approved}</b>approved</span><span><b>${s.rejected}</b>rejected</span>` +
-    `<span><b>${s.failed}</b>failed</span>`;
+    `<span><b>${s.failed}</b>failed</span>` + sep;
+}
+
+// Candidate search terms mined from approvals. Read-only by design — applying one is a
+// deliberate preferences edit, so the profile never narrows itself behind your back.
+async function loadSuggestions() {
+  const res = await fetch("/api/config/keyword-suggestions");
+  if (!res.ok) return;  // ponytail: silent — loadFeed already toasts when the API is down
+  const items = await res.json();
+
+  $("#suggested").hidden = items.length === 0;
+  $("#suggested-list").innerHTML = items.map((s) =>
+    `<button class="tag" data-tag="${esc(s.keyword)}" title="${s.approved_count} approved, ${s.rejected_count} rejected">` +
+    `${esc(s.keyword)}<span class="n">+${s.net}</span></button>`).join("");
 }
 
 async function loadFeed() {
@@ -282,6 +316,7 @@ async function review(id, status) {
   loadStats();
   loadFeed();
   loadApproved();
+  loadSuggestions();
 }
 
 async function trigger(btn) {
@@ -314,6 +349,7 @@ for (const id of ["f-status", "f-type", "f-score", "f-tag"]) {
 loadStats();
 loadFeed();
 loadApproved();
+loadSuggestions();
 </script>
 </body>
 </html>
