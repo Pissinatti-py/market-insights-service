@@ -63,6 +63,12 @@ The `collect_releases` task also seeds this set from `preferences.monitored_libr
 
 > `/stats` and `/calibration` are declared before `/{curation_id}` for the same reason as above.
 
+## Events — `/api/events`
+
+| Method | Path | Notes |
+|---|---|---|
+| GET | `/api/events` | Server-sent events (`text/event-stream`). One `data:` line per change — `{"kind": "curation", item_type, status}` for every curated item and `{"kind": "task", name, state, result}` for every finished task — relayed from the `mi:events` Redis channel; a `: ping` comment every 15 s keeps the connection alive. The review UI listens with `EventSource` and refreshes its counters/feed on each event. |
+
 ## Feed — `/api/feed`
 
 | Method | Path | Notes |

@@ -149,7 +149,7 @@
   <label>status
     <select id="f-status">
       <option value="">pending + approved</option>
-      <option value="pending">pending</option>
+      <option value="pending" selected>pending</option>
       <option value="approved">approved</option>
       <option value="rejected">rejected</option>
       <option value="failed">failed</option>
@@ -199,7 +199,7 @@
 
 <script>
 const $ = (s) => document.querySelector(s);
-const state = { page: 1, perPage: 20, numPages: 1 };
+const state = { page: 1, perPage: 20, numPages: 1, total: null };
 
 const KIND = { repository: "repository", article: "article", library_release: "release" };
 
@@ -259,13 +259,8 @@ async function loadFeed() {
   const res = await fetch(`/api/feed?${feedParams()}`);
   if (!res.ok) { toast(`Failed to load the feed (${res.status})`); return; }
   const data = await res.json();
-  state.numPages = data.num_pages;
-
-  $("#meta").textContent = `${data.total} signals — page ${data.page} of ${data.num_pages}`;
+  renderMeta(data);
   $("#empty").hidden = data.items.length > 0;
-  $("#page-info").textContent = `${data.page}/${data.num_pages}`;
-  $("#prev").disabled = data.page <= 1;
-  $("#next").disabled = data.page >= data.num_pages;
 
   $("#list").innerHTML = data.items.map((it) => `
     <article class="item t-${it.item_type}">
@@ -283,6 +278,36 @@ async function loadFeed() {
         </span>
       </div>
     </article>`).join("");
+}
+
+function renderMeta(data) {
+  state.total = data.total;
+  state.numPages = data.num_pages;
+  $("#meta").textContent = `${data.total} signals — page ${state.page} of ${data.num_pages}`;
+  $("#page-info").textContent = `${state.page}/${data.num_pages}`;
+  $("#prev").disabled = state.page <= 1;
+  $("#next").disabled = state.page >= data.num_pages;
+}
+
+// Re-render the list only when something new matches the current filters, and only on
+// page 1 — deeper pages just get their counts updated so items don't shift under the reader.
+// Comparing totals (not a `since` cursor) sidesteps browser/DB clock skew.
+async function refreshFeedIfChanged() {
+  const p = feedParams();
+  p.set("per_page", 1);
+  const res = await fetch(`/api/feed?${p}`);
+  if (!res.ok) return;
+  const data = await res.json();
+  if (data.total === state.total) return;
+  if (state.page === 1) return loadFeed();
+  renderMeta(data);
+}
+
+let refreshTimer;
+function scheduleRefresh() {
+  // ponytail: 1 s debounce collapses a burst of per-item events into one round-trip.
+  clearTimeout(refreshTimer);
+  refreshTimer = setTimeout(() => { loadStats(); refreshFeedIfChanged(); }, 1000);
 }
 
 // Newest-approved first, unpaginated — a running log of what survived review, so
@@ -336,7 +361,8 @@ document.addEventListener("click", (e) => {
   if (el.dataset.id) return review(el.dataset.id, el.dataset.status);
   if (el.dataset.tag !== undefined) { $("#f-tag").value = el.dataset.tag; state.page = 1; loadFeed(); }
   if (el.id === "f-clear") {
-    for (const id of ["f-status", "f-type", "f-score", "f-tag"]) $("#" + id).value = "";
+    for (const id of ["f-type", "f-score", "f-tag"]) $("#" + id).value = "";
+    $("#f-status").value = "pending";
     state.page = 1; loadFeed();
   }
   if (el.id === "prev" && state.page > 1) { state.page--; loadFeed(); }
@@ -350,6 +376,16 @@ loadStats();
 loadFeed();
 loadApproved();
 loadSuggestions();
+
+// Live updates: the API streams one event per curated item / finished task (see /api/events).
+// EventSource reconnects on its own; a fresh open also refreshes to catch anything missed meanwhile.
+const events = new EventSource("/api/events");
+events.onmessage = (e) => {
+  const ev = JSON.parse(e.data);
+  if (ev.kind === "task" && ev.result) toast(`${ev.name.split(".").pop()}: ${JSON.stringify(ev.result)}`);
+  scheduleRefresh();
+};
+events.onopen = scheduleRefresh;
 </script>
 </body>
 </html>

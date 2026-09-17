@@ -104,6 +104,14 @@ async def _clean_state() -> AsyncIterator[None]:
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_redis_events(monkeypatch) -> None:
+    """Curation inserts fire a Redis publish (src.core.events); tests have no Redis, so drop it."""
+    import src.core.events
+
+    monkeypatch.setattr(src.core.events, "publish", lambda kind, **data: None)
+
+
 @pytest_asyncio.fixture
 async def client() -> AsyncIterator[AsyncClient]:
     transport = ASGITransport(app=app)

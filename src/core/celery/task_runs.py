@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 
 from celery.signals import task_postrun
 
+from src.core import events
 from src.db.session import SyncSession
 from src.models.task_run import TaskRun
 from src.services.logger_service import logger
@@ -35,5 +36,8 @@ def record_task_run(task=None, retval=None, state=None, **kwargs) -> None:
                 )
             )
             session.commit()
+        events.publish(
+            "task", name=task.name, state=state or "UNKNOWN", result=retval if isinstance(retval, dict) else None
+        )
     except Exception:
         logger.exception("task_runs: failed to record run — task result is unaffected")
