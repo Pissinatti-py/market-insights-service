@@ -15,6 +15,7 @@ from __future__ import annotations
 from celery import Celery
 
 import src.core.celery.task_runs  # noqa: F401 — connects the task_postrun recorder
+import src.core.events  # noqa: F401 — Curation after_insert → Redis event for the review UI
 from src.core.celery.schedules import beat_schedule
 from src.core.conf import settings
 

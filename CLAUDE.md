@@ -91,6 +91,12 @@ item types, newest first.
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are
 covered with zero extra code, and recording never breaks the task (errors are swallowed).
 
+**Live updates for the review UI.** `src/core/events.py` publishes a JSON event on the `mi:events`
+Redis channel from a `Curation` `after_insert` listener (per item, so the page moves while a batch is
+still draining) and from the task-run recorder; `GET /api/events` relays the channel as server-sent
+events and `index.html` listens with `EventSource`. Publishing is fire-and-forget — Redis down only
+loses the notification, never the task.
+
 **Config split.** Infra settings (`DATABASE_URL`, `OLLAMA_*`, `GITHUB_TOKEN`, …)
 are env-driven via pydantic-settings in `src/core/conf.py`. The *what to search for* (stacks,
 keywords, monitored libraries, per-source toggles) is a DB row, edited via
