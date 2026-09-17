@@ -8,6 +8,8 @@ the per-source toggle, upserting idempotently, writing the extra rows a task own
 something new landed.
 """
 
+from datetime import datetime, timedelta, timezone
+
 import httpx
 import pytest
 import respx
@@ -168,6 +170,10 @@ def test_collect_releases_skips_one_dead_package_and_finishes_the_run(chained):
 # ------------------------------------------------------------------------- articles
 
 
+# Relative so the ARTICLE_MAX_AGE_DAYS gate never turns this suite into a time bomb.
+_RECENT = (datetime.now(timezone.utc) - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def _devto(title: str, likes: int = 5) -> dict:
     return {
         "url": f"https://dev.to/{title.replace(' ', '-').lower()}",
@@ -176,11 +182,11 @@ def _devto(title: str, likes: int = 5) -> dict:
         "description": "excerpt",
         "public_reactions_count": likes,
         "comments_count": 1,
-        "published_at": "2026-08-04T10:00:00Z",
+        "published_at": _RECENT,
     }
 
 
-def _hn(title: str, points: int = 200, created: str = "2026-08-04T10:00:00Z") -> dict:
+def _hn(title: str, points: int = 200, created: str = _RECENT) -> dict:
     return {
         "objectID": "42",
         "title": title,
