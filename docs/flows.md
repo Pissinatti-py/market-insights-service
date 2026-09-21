@@ -98,14 +98,22 @@ type can starve the others:
    truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
 5. Render the item (with published/created dates and engagement) and call
    `curation_agent.curate(text, profile, context, feedback)`:
-   - POSTs to Ollama `/api/chat` constrained to the `CurationCreate` JSON schema
-     (`temperature: 0.1`). The prompt carries a scoring rubric, anchor examples,
-     your past review decisions, and today's date (stale news is capped).
+   - POSTs to Ollama `/api/chat` constrained to a `{band, summary, tags}` JSON schema (band first, so
+     the pick is not anchored by the model's own summary)
+     (`temperature: 0.1`, `logprobs` on). The prompt carries the band rubric, anchor
+     examples, your past review decisions, and today's date (stale news → `noise`).
+   - **The score is a decision, not an invented number.** The model picks one closed
+     band — `noise` 0.20 · `routine` 0.55 · `relevant` 0.80 · `must_see` 0.95 — and the
+     score is those anchors weighted by the model's own token probability over the four
+     bands at the band position (case-merged and renormalized; Ollama's alternatives are
+     taken before the grammar mask, so non-band tokens are dropped). No usable logprobs →
+     the picked band's anchor. `raw_llm_output` records `band_probs` and `score_source`
+     (`logprobs` | `label`).
    - Ollama down / timeout / 5xx → `CollectorRetriable` (task retries).
    - Invalid output → `CollectorTerminal`: a **dead-letter row** is written
      (`status=failed`, error in `raw_llm_output`) so the item is never re-selected;
      `recurate_all` is its retry path.
-6. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
+6. Persist a `Curation` row: `summary`, `tags`, `importance_score` (the weighted band score), `status=pending`,
    the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
 
 Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).

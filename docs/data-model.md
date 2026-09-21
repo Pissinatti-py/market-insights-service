@@ -74,7 +74,7 @@ points into one of the three source tables — there is deliberately no DB-level
 | `item_id` | UUID | The analysed row's id (in the matching table). |
 | `summary` | text | One–two sentence LLM summary. |
 | `tags` | JSONB list | Short lowercase technology/topic tags. |
-| `importance_score` | Numeric(4,3) | 0–1 relevance to the profile (indexed — list default sort). |
+| `importance_score` | Numeric(4,3) | 0–1 relevance to the profile (indexed — list default sort). Band anchors (`noise` 0.20 … `must_see` 0.95) weighted by the model's band probabilities; see `raw_llm_output.band_probs`. |
 | `status` | enum | `pending \| approved \| rejected` (manual review). |
 | `reviewed_by` | text | Who reviewed it. |
 | `reviewed_at` | timestamptz | When a human approved/rejected it (indexed; null while pending). Not `updated_at` — `recurate_all` bumps that while preserving the decision. |

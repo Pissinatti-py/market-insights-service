@@ -80,7 +80,9 @@ the loop is self-reinforcing, so it must not also rewrite what the collectors se
 fetches the full article body for articles (`tools/article_reader`, best-effort — a failure drops
 the block, never breaks the run); repos/releases carry their evidence in the rendered item text.
 Then `curation_agent.curate()` sends item + profile + context to Ollama's `/api/chat` (JSON mode,
-schema-constrained) and validates the output through `CurationCreate`. **The curation prompt lives
+schema-constrained) and validates the output through `CurationCreate`. The model never writes the
+score: it picks one of four closed bands (`_BANDS`), and `importance_score` is the band anchors
+weighted by its own logprobs over those bands (fallback: the picked band's anchor). **The curation prompt lives
 only in `curation_agent.py`** — never inline it into a task. Retriable failures (Ollama down/5xx)
 raise `CollectorRetriable` and the task retries; bad output raises `CollectorTerminal` and the item
 is **dead-lettered** as a `status=failed` curation row (never re-selected; `recurate_all` is the
