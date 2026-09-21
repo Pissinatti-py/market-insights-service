@@ -85,15 +85,18 @@ Returns `{"fetched": N, "inserted": M}`.
 `src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` ·
 schedule: **chained after each collection** + daily 02:00 fallback sweep
 
-Curates a batch (`CURATION_BATCH_SIZE`, default 50) **round-robin** across the
-three item types (articles, repositories, library releases), newest first — no
-type can starve the others:
+Drains the **whole** uncurated backlog in one run, newest first, in pages of
+`CURATION_BATCH_SIZE` (default 50). Each page is interleaved **round-robin** across the
+three item types (articles, repositories, library releases), so no type can starve the
+others. Each page is re-selected, so items a collector lands mid-drain go ahead of the
+older backlog. The Redis lock is extended after every page, so a run that fires while a
+drain is going skips and loses nothing:
 
 1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
 2. Read **review feedback** once per run: the most recently approved and rejected
    curations (see "Feeding review decisions back" below).
 3. Interleave rows with **no** curation row yet (`item.id NOT IN
-   (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the budget.
+   (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the page size; repeat until nothing is left.
 4. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
    truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
 5. Render the item (with published/created dates and engagement) and call

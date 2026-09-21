@@ -7,6 +7,8 @@ Every collector chains this task, so runs overlap: a Redis single-flight lock
 skips a run while another is draining, and the ``(item_type, item_id)`` unique
 constraint is tolerated per item (skip, not crash) so a lost race never kills
 the batch or duplicates LLM work for long.
+A run drains the whole backlog (newest first, page by page), so a skipped run
+loses nothing — the run holding the lock picks those items up before it exits.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
 Past approve/reject decisions are loaded once per run and passed to the agent as
@@ -145,7 +147,7 @@ def _curate_one(item_type: CurationItemType, item, profile: dict, feedback: list
 
 
 _LOCK_KEY = "mi:lock:curate_uncurated"
-_LOCK_TTL_SECONDS = 3 * 60 * 60  # comfortably above a worst-case batch (200 items × ~35 s LLM + enrichment)
+_LOCK_TTL_SECONDS = 3 * 60 * 60  # per page — reacquired after each one, so a long drain never expires it
 
 
 def _acquire_curation_lock():
@@ -177,6 +179,43 @@ def _store(session, row: Curation) -> bool:
         return False
 
 
+def _curate_page(session, page, profile: dict, feedback: list[dict]) -> tuple[int, int]:
+    """Curate one page of items; returns ``(curated, failed)``."""
+    curated = 0
+    failed = 0
+    for item_type, item in page:
+        try:
+            result, raw = _curate_one(item_type, item, profile, feedback)
+        except CollectorTerminal as exc:
+            logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
+            # Dead-letter: the unique constraint keeps the item out of future
+            # selections; recurate_all re-processes it after prompt fixes.
+            dead_letter = Curation(
+                item_type=item_type,
+                item_id=item.id,
+                status=CurationStatus.FAILED,
+                model=settings.OLLAMA_MODEL,
+                raw_llm_output={"error": str(exc)},
+            )
+            if _store(session, dead_letter):
+                failed += 1
+            continue
+
+        row = Curation(
+            item_type=item_type,
+            item_id=item.id,
+            summary=result.summary,
+            tags=result.tags,
+            importance_score=result.importance_score,
+            status=CurationStatus.PENDING,
+            model=settings.OLLAMA_MODEL,
+            raw_llm_output=raw,
+        )
+        if _store(session, row):
+            curated += 1
+    return curated, failed
+
+
 @celery_app.task(
     bind=True,
     name="src.tasks.curation_tasks.curate_uncurated",
@@ -186,11 +225,12 @@ def _store(session, row: Curation) -> bool:
 )
 def curate_uncurated(self) -> dict:
     """
-    Drain the uncurated backlog, capped at ``CURATION_BATCH_SIZE`` items per run
-    (safety cap — the rest waits for the next run). Types are interleaved
-    round-robin so articles cannot starve repos/releases. Single-flight: if
-    another run is already draining, this one skips (the backlog waits for the
-    next scheduled/chained fire).
+    Drain the **whole** uncurated backlog in one run, newest first, in pages of
+    ``CURATION_BATCH_SIZE``. Each page is re-selected, so items collected while
+    the drain is running jump ahead of the older backlog instead of waiting for
+    another run. Types are interleaved round-robin so articles cannot starve
+    repos/releases. Single-flight: if another run is already draining, this one
+    skips — the lock is extended after every page, so a long drain keeps it.
 
     :return: ``{"curated": int, "failed": int}`` (failed = dead-lettered invalid
         output), or ``{"skipped": "already running"}``.
@@ -203,42 +243,30 @@ def curate_uncurated(self) -> dict:
 
     curated = 0
     failed = 0
+    seen: set = set()
 
     try:
         with SyncSession() as session:
             profile = _load_profile(session)
             feedback = _load_feedback(session)
 
-            for item_type, item in _next_batch(session, settings.CURATION_BATCH_SIZE):
-                try:
-                    result, raw = _curate_one(item_type, item, profile, feedback)
-                except CollectorTerminal as exc:
-                    logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
-                    # Dead-letter: the unique constraint keeps the item out of future
-                    # selections; recurate_all re-processes it after prompt fixes.
-                    dead_letter = Curation(
-                        item_type=item_type,
-                        item_id=item.id,
-                        status=CurationStatus.FAILED,
-                        model=settings.OLLAMA_MODEL,
-                        raw_llm_output={"error": str(exc)},
-                    )
-                    if _store(session, dead_letter):
-                        failed += 1
-                    continue
-
-                row = Curation(
-                    item_type=item_type,
-                    item_id=item.id,
-                    summary=result.summary,
-                    tags=result.tags,
-                    importance_score=result.importance_score,
-                    status=CurationStatus.PENDING,
-                    model=settings.OLLAMA_MODEL,
-                    raw_llm_output=raw,
-                )
-                if _store(session, row):
-                    curated += 1
+            while True:
+                # Re-select per page so items collected mid-drain still go newest first.
+                batch = _next_batch(session, settings.CURATION_BATCH_SIZE)
+                page = [(item_type, item) for item_type, item in batch if (item_type, item.id) not in seen]
+                if not page:
+                    # Empty backlog — or every row came back again (its insert failed
+                    # for a reason other than the unique constraint): stop, don't spin.
+                    break
+                seen.update((item_type, item.id) for item_type, item in page)
+                curated_delta, failed_delta = _curate_page(session, page, profile, feedback)
+                curated += curated_delta
+                failed += failed_delta
+                if lock:
+                    try:
+                        lock.reacquire()  # a full drain can outlive the TTL; keep single-flight
+                    except RedisError as exc:
+                        logger.warning(f"curate_uncurated: could not extend lock: {exc}")
     finally:
         if lock:
             try:

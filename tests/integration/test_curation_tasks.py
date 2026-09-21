@@ -1,6 +1,6 @@
 """Curation task orchestration: dead-letter on terminal output + round-robin batching."""
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -272,9 +272,71 @@ def test_batch_round_robins_across_types(db_session, monkeypatch):
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 3)
     result = curation_tasks.curate_uncurated.apply().get()
-    assert result == {"curated": 3, "failed": 0}
+    assert result == {"curated": 6, "failed": 0}
 
     with SyncSession() as session:
-        types = [c.item_type for c in session.query(Curation).all()]
-        # One of each — articles cannot starve the other types.
-        assert sorted(t.value for t in types) == ["article", "library_release", "repository"]
+        first_page = session.query(Curation).order_by(Curation.created_at).limit(3).all()
+        # One of each in the first page — articles cannot starve the other types.
+        assert sorted(c.item_type.value for c in first_page) == ["article", "library_release", "repository"]
+
+
+def _seed_aged_articles(session, titles: list[str]) -> None:
+    """Seed articles oldest → newest, in list order, a day apart."""
+    now = datetime.now(timezone.utc)
+    for age, title in enumerate(reversed(titles)):
+        _seed_article(session, title).created_at = now - timedelta(days=age)
+    session.commit()
+
+
+def _recording_curate(order: list[str]):
+    def _curate(item_text, profile, context="", feedback=None):
+        order.append(item_text.split("'")[1])  # _render_article quotes the title
+        return _ok_curate(item_text, profile, context)
+
+    return _curate
+
+
+def test_single_run_drains_whole_backlog_newest_first(db_session, monkeypatch):
+    with SyncSession() as session:
+        _seed_aged_articles(session, ["a1", "a2", "a3", "a4", "a5"])
+
+    order: list[str] = []
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _recording_curate(order))
+    monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
+    result = curation_tasks.curate_uncurated.apply().get()
+
+    # Backlog is 2.5× the page size, yet one run curates all of it, newest first.
+    assert result == {"curated": 5, "failed": 0}
+    assert order == ["a5", "a4", "a3", "a2", "a1"]
+
+
+def test_items_collected_mid_drain_jump_the_older_backlog(db_session, monkeypatch):
+    with SyncSession() as session:
+        _seed_aged_articles(session, ["old-1", "old-2", "old-3"])
+
+    order: list[str] = []
+    record = _recording_curate(order)
+
+    def _curate(item_text, profile, context="", feedback=None):
+        if not order:  # a collector lands a fresh item while page 1 is being curated
+            with SyncSession() as session:
+                _seed_article(session, "fresh")
+        return record(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
+    monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
+    result = curation_tasks.curate_uncurated.apply().get()
+
+    assert result == {"curated": 4, "failed": 0}
+    assert order == ["old-3", "old-2", "fresh", "old-1"]
+
+
+def test_drain_stops_when_rows_never_store(db_session, monkeypatch):
+    """An item whose insert keeps failing is re-selected every page — the run must end, not spin."""
+    with SyncSession() as session:
+        _seed_aged_articles(session, ["stuck-1", "stuck-2"])
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
+    monkeypatch.setattr(curation_tasks, "_store", lambda session, row: False)
+    monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 5)
+    assert curation_tasks.curate_uncurated.apply().get() == {"curated": 0, "failed": 0}
