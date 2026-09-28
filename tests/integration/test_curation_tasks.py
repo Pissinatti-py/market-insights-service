@@ -4,7 +4,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from src.core.exceptions import CollectorTerminal
+from src.core.exceptions import CollectorRetriable, CollectorTerminal
 from src.db.session import SyncSession
 from src.models.article import Article, ArticleSource
 from src.models.curation import Curation, CurationItemType, CurationStatus
@@ -86,8 +86,22 @@ def _drain(requeued: list[str]) -> list[dict]:
             return results
 
 
-def _ok_curate(item_text, profile, context="", feedback=None):
-    return CurationCreate(summary="ok", tags=["x"], importance_score=0.5), {"summary": "ok"}
+def _fake_embed(texts: list[str]) -> list[list[float]]:
+    """Deterministic unit vectors: 'keep' text along x, 'drop' along y, anything else diagonal."""
+    return [_KEEP if "keep" in t else _DROP if "drop" in t else _DIAGONAL for t in texts]
+
+
+_KEEP, _DROP, _DIAGONAL = [1.0, 0.0], [0.0, 1.0], [0.6, 0.8]
+
+
+@pytest.fixture(autouse=True)
+def _offline_embeddings(monkeypatch):
+    """The ranker's embedding model is an Ollama call — keep the tasks offline."""
+    monkeypatch.setattr(curation_tasks.ranker, "embed", _fake_embed)
+
+
+def _ok_curate(item_text, profile, context=""):
+    return CurationCreate(summary="ok", tags=["x"]), {"summary": "ok"}
 
 
 def test_terminal_output_dead_letters_and_is_not_reselected(db_session, monkeypatch):
@@ -95,7 +109,7 @@ def test_terminal_output_dead_letters_and_is_not_reselected(db_session, monkeypa
         item = _seed_article(session, "Broken output")
         item_id = item.id
 
-    def _boom(item_text, profile, context="", feedback=None):
+    def _boom(item_text, profile, context=""):
         raise CollectorTerminal("bad json")
 
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _boom)
@@ -117,7 +131,7 @@ def test_lock_held_skips_run_entirely(db_session, monkeypatch):
     with SyncSession() as session:
         _seed_article(session, "locked-out")
 
-    monkeypatch.setattr(curation_tasks, "_acquire_curation_lock", lambda: False)
+    monkeypatch.setattr(curation_tasks, "_acquire_lock", lambda key, ttl_seconds: False)
     result = curation_tasks.curate_uncurated.apply().get()
     assert result == {"skipped": "already running"}
 
@@ -133,7 +147,7 @@ def test_concurrent_duplicate_insert_does_not_kill_batch(db_session, monkeypatch
         _seed_repo(session, "owner/safe")
         article_ids = [a1.id, a2.id]
 
-    def _racing_curate(item_text, profile, context="", feedback=None):
+    def _racing_curate(item_text, profile, context=""):
         # First call: a concurrent run finishes both articles before our commits land.
         with SyncSession() as session:
             for item_id in article_ids:
@@ -194,90 +208,156 @@ def test_recurate_preserves_review_decisions(db_session, monkeypatch):
         assert approved.summary == "ok"  # AI fields still refreshed
         retried = session.query(Curation).filter(Curation.item_id == dead_id).one()
         assert retried.status == CurationStatus.PENDING  # failed rows go back into review
+        assert float(approved.importance_score) == 0.1  # the score is the ranker's — rerank_all owns it
 
 
-def _seed_reviewed(session, title: str, status: CurationStatus, summary: str) -> Curation:
-    """A past review decision — the material the feedback loop feeds back to the LLM."""
+def _seed_reviewed(session, title: str, status: CurationStatus, embedding: list[float] | None) -> Curation:
+    """A past review verdict — the ranker's training material once it has an embedding."""
     article = _seed_article(session, title)
     row = Curation(
         item_type=CurationItemType.ARTICLE,
         item_id=article.id,
-        summary=summary,
+        summary=f"summary of {title}",
         tags=["tag-" + title],
         importance_score=0.5,
         status=status,
         reviewed_at=datetime.now(timezone.utc),
         model="old-model",
+        embedding=embedding,
     )
     session.add(row)
     session.commit()
     return row
 
 
-def test_review_decisions_reach_the_agent_as_feedback(db_session, monkeypatch):
+def _seed_verdicts(session, embedded: bool = True) -> None:
+    """Two approved 'keep' and two rejected 'drop' items — enough contrast for the ranker."""
+    for i in range(2):
+        _seed_reviewed(session, f"keep-{i}", CurationStatus.APPROVED, _KEEP if embedded else None)
+        _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, _DROP if embedded else None)
+
+
+def _score_of(title: str) -> float:
     with SyncSession() as session:
-        for i in range(2):
-            _seed_reviewed(session, f"keep-{i}", CurationStatus.APPROVED, f"kept {i}")
-            _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, f"dropped {i}")
-        _seed_article(session, "fresh")
-
-    seen: list[list[dict]] = []
-
-    def _capture(item_text, profile, context="", feedback=None):
-        seen.append(feedback)
-        return _ok_curate(item_text, profile, context)
-
-    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
-    assert curation_tasks.curate_uncurated.apply().get() == {"curated": 1, "failed": 0}
-
-    (feedback,) = seen
-    decisions = sorted(f["decision"] for f in feedback)
-    assert decisions == ["approved", "approved", "rejected", "rejected"]
-    assert {f["summary"] for f in feedback} == {"kept 0", "kept 1", "dropped 0", "dropped 1"}
+        article = session.query(Article).filter(Article.title == title).one()
+        row = session.query(Curation).filter(Curation.item_id == article.id).one()
+        return float(row.importance_score)
 
 
-def test_pending_and_unreviewed_rows_are_not_feedback(db_session, monkeypatch):
+def test_new_items_are_scored_by_their_reviewed_neighbours(db_session, monkeypatch):
+    with SyncSession() as session:
+        _seed_verdicts(session)
+        _seed_article(session, "keep-fresh")
+        _seed_article(session, "drop-fresh")
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
+    assert curation_tasks.curate_uncurated.apply().get() == {"curated": 2, "failed": 0}
+
+    assert _score_of("keep-fresh") == 1.0  # all its nearest reviewed neighbours were approved
+    assert _score_of("drop-fresh") == 0.0
+    with SyncSession() as session:
+        fresh = session.query(Article).filter(Article.title == "keep-fresh").one()
+        stored = session.query(Curation).filter(Curation.item_id == fresh.id).one()
+        assert stored.embedding == _KEEP  # kept for rerank_all and as a future example
+
+
+def test_pending_rows_are_not_examples(db_session, monkeypatch):
     """Only a human verdict counts — a pending row carries no decision to learn from."""
     with SyncSession() as session:
-        pending = _seed_reviewed(session, "undecided", CurationStatus.PENDING, "no verdict")
-        pending.reviewed_at = None
-        session.commit()
-        _seed_article(session, "fresh")
-
-    seen: list[list[dict]] = []
-
-    def _capture(item_text, profile, context="", feedback=None):
-        seen.append(feedback)
-        return _ok_curate(item_text, profile, context)
-
-    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
-    curation_tasks.curate_uncurated.apply().get()
-    assert seen == [[]]
-
-
-def test_recurate_never_feeds_an_item_its_own_decision(db_session, monkeypatch):
-    """Otherwise every approved item re-scores against itself and the calibration report lies."""
-    with SyncSession() as session:
-        target = _seed_reviewed(session, "self", CurationStatus.APPROVED, "the item itself")
-        _seed_reviewed(session, "keep-other", CurationStatus.APPROVED, "another keeper")
         for i in range(2):
-            _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, f"dropped {i}")
-        target_item_id = target.item_id
+            _seed_reviewed(session, f"keep-undecided-{i}", CurationStatus.PENDING, _KEEP)
+            _seed_reviewed(session, f"drop-{i}", CurationStatus.REJECTED, _DROP)
+        _seed_article(session, "keep-fresh")
 
-    by_summary: dict[str, list[dict]] = {}
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
+    curation_tasks.curate_uncurated.apply().get()
+    # Only rejections count, so there is no contrast: cold start = similarity to the profile.
+    assert _score_of("keep-fresh") == pytest.approx(0.6)
 
-    def _capture(item_text, profile, context="", feedback=None):
-        by_summary[item_text] = feedback
-        return _ok_curate(item_text, profile, context)
 
-    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _capture)
-    curation_tasks.recurate_all.apply().get()
+def test_rerank_never_scores_an_item_against_its_own_verdict(db_session):
+    """Otherwise every reviewed item ranks itself and the calibration report lies."""
+    with SyncSession() as session:
+        _seed_reviewed(session, "keep-self", CurationStatus.APPROVED, _KEEP)
+        for i in range(2):
+            _seed_reviewed(session, f"other-approved-{i}", CurationStatus.APPROVED, _DROP)
+            _seed_reviewed(session, f"keep-rejected-{i}", CurationStatus.REJECTED, _KEEP)
 
-    own_run = next(fb for text, fb in by_summary.items() if "'self'" in text)
-    assert target_item_id not in [f["item_id"] for f in own_run]
-    assert "the item itself" not in [f["summary"] for f in own_run]
-    # The other examples still reach it — only the self-reference is dropped.
-    assert "another keeper" in [f["summary"] for f in own_run]
+    curation_tasks.rerank_all.apply().get()
+    # Its own approval would pull it up; its other KEEP-side neighbours were all rejected.
+    assert _score_of("keep-self") == 0.0
+
+
+def test_rerank_backfills_missing_embeddings_and_rescores(db_session):
+    with SyncSession() as session:
+        _seed_verdicts(session, embedded=False)  # reviewed before the ranker existed
+        pending = _seed_article(session, "keep-pending")
+        dead = _seed_article(session, "keep-dead")
+        session.add(
+            Curation(
+                item_type=CurationItemType.ARTICLE,
+                item_id=pending.id,
+                summary="old",
+                importance_score=0.3,
+                status=CurationStatus.PENDING,
+            )
+        )
+        session.add(Curation(item_type=CurationItemType.ARTICLE, item_id=dead.id, status=CurationStatus.FAILED))
+        session.commit()
+
+    assert curation_tasks.rerank_all.apply().get() == {"embedded": 5, "reranked": 5, "changed": 5}
+    assert _score_of("keep-pending") == 1.0
+    with SyncSession() as session:
+        dead_row = session.query(Curation).filter(Curation.status == CurationStatus.FAILED).one()
+        assert dead_row.embedding is None and dead_row.importance_score is None  # dead letters stay unscored
+
+
+def test_rerank_rewrites_only_scores_that_moved(db_session):
+    """Unchanged verdicts mean an unchanged feed — no rewrite of the indexed column on every row."""
+    with SyncSession() as session:
+        _seed_verdicts(session)
+        _seed_reviewed(session, "keep-pending", CurationStatus.PENDING, _KEEP)
+
+    first = curation_tasks.rerank_all.apply().get()
+    assert first["reranked"] == 5 and first["changed"] > 0
+    assert curation_tasks.rerank_all.apply().get() == {"embedded": 0, "reranked": 5, "changed": 0}
+
+    with SyncSession() as session:  # a new verdict moves only what it is close to
+        _seed_reviewed(session, "drop-late", CurationStatus.REJECTED, _KEEP)
+    assert curation_tasks.rerank_all.apply().get()["changed"] > 0
+    assert _score_of("keep-pending") < 1.0
+
+
+def test_rerank_skips_while_another_run_holds_the_lock(db_session, monkeypatch):
+    monkeypatch.setattr(curation_tasks, "_acquire_lock", lambda key, ttl_seconds: False)
+    assert curation_tasks.rerank_all.apply().get() == {"skipped": "already running"}
+
+
+def test_embed_failure_costs_no_llm_call(db_session, monkeypatch):
+    """The batch is embedded before any LLM call, so a missing embed model wastes no LLM work."""
+    with SyncSession() as session:
+        _seed_article(session, "unembeddable")
+
+    def _embed_down(texts):
+        raise CollectorRetriable("ollama embed: 404 model not found")
+
+    llm_calls: list[str] = []
+    monkeypatch.setattr(curation_tasks.ranker, "embed", _embed_down)
+    monkeypatch.setattr(
+        curation_tasks.curation_agent, "curate", lambda text, profile, context="": llm_calls.append(text)
+    )
+    assert not curation_tasks.curate_uncurated.apply().successful()
+    assert llm_calls == []
+    with SyncSession() as session:
+        assert session.query(Curation).count() == 0
+
+
+def test_empty_backlog_never_calls_ollama(db_session, monkeypatch):
+    def _no_ollama(texts):
+        raise AssertionError("an empty run must not embed anything")
+
+    monkeypatch.setattr(curation_tasks.ranker, "embed", _no_ollama)
+    assert curation_tasks.curate_uncurated.apply().get() == {"curated": 0, "failed": 0}
 
 
 def test_batch_round_robins_across_types(db_session, monkeypatch, requeued):
@@ -309,7 +389,7 @@ def _seed_aged_articles(session, titles: list[str]) -> None:
 
 
 def _recording_curate(order: list[str]):
-    def _curate(item_text, profile, context="", feedback=None):
+    def _curate(item_text, profile, context=""):
         order.append(item_text.split("'")[1])  # _render_article quotes the title
         return _ok_curate(item_text, profile, context)
 
@@ -336,7 +416,7 @@ def test_items_collected_mid_drain_jump_the_older_backlog(db_session, monkeypatc
     order: list[str] = []
     record = _recording_curate(order)
 
-    def _curate(item_text, profile, context="", feedback=None):
+    def _curate(item_text, profile, context=""):
         if not order:  # a collector lands a fresh item while batch 1 is being curated
             with SyncSession() as session:
                 _seed_article(session, "fresh")
@@ -354,7 +434,7 @@ def test_items_landing_during_a_partial_batch_are_requeued(db_session, monkeypat
     with SyncSession() as session:
         _seed_article(session, "only")
 
-    def _curate(item_text, profile, context="", feedback=None):
+    def _curate(item_text, profile, context=""):
         if "'only'" in item_text:
             with SyncSession() as session:
                 _seed_article(session, "late")
@@ -380,22 +460,19 @@ def test_no_requeue_when_nothing_stores(db_session, monkeypatch, requeued):
 
 
 def test_decisions_made_mid_drain_reach_later_runs(db_session, monkeypatch, requeued):
-    """A backlog drains over many runs — reviews made meanwhile must calibrate the rest of it."""
+    """A backlog drains over many runs — verdicts given meanwhile must rank the rest of it."""
     with SyncSession() as session:
-        _seed_aged_articles(session, ["a1", "a2", "a3"])
+        _seed_aged_articles(session, ["keep-a1", "keep-a2", "keep-a3"])
 
-    feedbacks: list[list[dict]] = []
-
-    def _curate(item_text, profile, context="", feedback=None):
-        if not feedbacks:  # the user reviews while batch 1 is being curated
-            with SyncSession() as session:
-                _seed_reviewed(session, "late-keep", CurationStatus.APPROVED, "reviewed mid-drain")
-        feedbacks.append(feedback)
+    def _curate(item_text, profile, context=""):
+        with SyncSession() as session:
+            if not session.query(Curation).filter(Curation.status == CurationStatus.APPROVED).count():
+                _seed_verdicts(session)  # the user reviews while batch 1 is being curated
         return _ok_curate(item_text, profile, context)
 
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
     _drain(requeued)
 
-    summaries = [[f["summary"] for f in fb] for fb in feedbacks]
-    assert summaries == [[], [], ["reviewed mid-drain"]]
+    # Batch 1 had no verdicts yet (profile similarity); batch 2 is ranked by them.
+    assert [_score_of(t) for t in ("keep-a3", "keep-a2", "keep-a1")] == [pytest.approx(0.6), pytest.approx(0.6), 1.0]

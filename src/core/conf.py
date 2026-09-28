@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     OLLAMA_BASE_URL: str = "http://host.docker.internal:11434"
     OLLAMA_MODEL: str = "qwen3:14b-q8_0"
     OLLAMA_REQUEST_TIMEOUT_SECONDS: float = 120.0
+    # Local embedding model behind the importance ranker (src/services/ranker.py). Changing it
+    # mixes vector spaces: NULL mi__curation.embedding and run rerank_all to re-embed.
+    OLLAMA_EMBED_MODEL: str = "bge-m3"
     # Per-run safety cap: curation is chained after each collector, so runs stay
     # small; anything beyond waits for the next chained run or the daily sweep.
     CURATION_BATCH_SIZE: int = 50

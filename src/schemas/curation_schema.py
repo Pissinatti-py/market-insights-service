@@ -8,19 +8,16 @@ from src.models.curation import CurationItemType, CurationStatus
 
 class CurationCreate(BaseModel):
     """
-    The validated shape of an LLM curation result.
+    The validated shape of an LLM curation result — the description only; the
+    importance score comes from the ranker (``src/services/ranker.py``).
 
     The curation agent coerces the model's raw JSON into this schema before
-    persisting — invalid output (missing summary, score out of range) is rejected
-    as a terminal failure, exactly like pissync validates LLM output through the
-    create-schema.
+    persisting — invalid output (missing summary) is rejected as a terminal
+    failure, exactly like pissync validates LLM output through the create-schema.
     """
 
     summary: str = Field(min_length=1)
     tags: list[str] = []
-    # float, not Decimal: pydantic renders Decimal as anyOf[number, string+lookahead
-    # regex] in JSON schema, and that regex segfaults Ollama's grammar compiler.
-    importance_score: float = Field(ge=0, le=1)
 
     @field_validator("tags")
     @classmethod
@@ -87,11 +84,11 @@ class CalibrationBand(BaseModel):
 
 class CurationCalibration(BaseModel):
     """
-    Whether the LLM's scores agree with the human verdict (``GET /api/curation/calibration``).
+    Whether the ranker's scores agree with the human verdict (``GET /api/curation/calibration``).
 
     ``separation`` is the headline number: how much higher the model scored what was
-    approved than what was rejected. It should widen as review feedback accumulates
-    into the prompt; a value near zero means the score is not discriminating at all.
+    approved than what was rejected. It should widen as review verdicts accumulate
+    into the ranker; a value near zero means the score is not discriminating at all.
     """
 
     reviewed: int

@@ -3,7 +3,7 @@ Unified feed — the product face of the pipeline.
 
 One call returns curated signals across all three item tables (repositories,
 library releases, articles), joined with their curation row, ranked by the
-LLM's importance score. Defaults to pending + approved — rejected/failed items
+ranker's importance score. Defaults to pending + approved — rejected/failed items
 never surface unless explicitly requested via ``?status=``.
 """
 

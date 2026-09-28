@@ -3,9 +3,12 @@ LLM curation agent.
 
 Talks to a local **Ollama** daemon over plain HTTP (`/api/chat`) — no provider
 SDK. Given a collected item plus the user's technical profile, it returns a
-JSON object with a short summary, tags, and an importance score. This module is
-the **only place** the curation prompt lives; tweak it here, never inline it
-into the task.
+JSON object with a short summary and tags. This module is the **only place** the
+curation prompt lives; tweak it here, never inline it into the task.
+
+It deliberately does **not** score: the LLM's own importance score did not
+predict review verdicts (AUC 0.41 on the first 81 reviews). Ranking is the
+local decision model in ``src/services/ranker.py``, learned from those verdicts.
 
 The model's raw JSON is coerced and validated through :class:`CurationCreate`
 before it is trusted — invalid output is a terminal failure (no row written),
@@ -27,91 +30,30 @@ _SYSTEM_PROMPT = (
     "You are a senior software-engineering analyst curating tech-market signals for a "
     "team that also publishes about them. Given one item (a repository, a library "
     "release, or an article) plus optional EXTRA CONTEXT (a full article body or a "
-    "trending signal) and the user's technical profile, judge how relevant and "
-    "important it is.\n"
-    "Weigh these heavily:\n"
-    "- News and publishable topics — an article, announcement, or development worth "
-    "writing about scores high even if it is not a brand-new library.\n"
-    "- A common or already-used library is highly relevant when a NEW feature, release, "
-    "or related news pops out around it — established does not mean unimportant.\n"
-    "- A library the user explicitly monitors (monitored_libraries in the profile) is a "
-    "strong relevance signal for its releases.\n"
+    "trending signal) and the user's technical profile, describe it for that user.\n"
+    "- summary: terse — what this is, then an honest verdict for this profile. Name the profile "
+    "entry it touches when there is one: a stack, an area, a keyword, or a library the user "
+    "monitors (monitored_libraries, written ecosystem:name — pypi:langgraph is LangGraph). Say "
+    "plainly when it is routine (a patch or minor bump, a mature project with no news, low "
+    "technical depth) or old news relative to TODAY. No hype, no second person.\n"
     "- Use the full article body in EXTRA CONTEXT, when present, as the primary basis "
     "for an article.\n"
-    "- Recency matters: news older than ~2 weeks relative to TODAY is stale — cap it at "
-    "0.4 unless it is a durable reference/resource.\n"
-    "Calibrate importance_score against this rubric — spread scores across the full "
-    "range; do NOT default to the top band:\n"
-    "- 0.9-1.0: exceptional, must-see for this profile (rare — a handful per week at most)\n"
-    "- 0.7-0.9: clearly relevant news or release worth reading soon\n"
-    "- 0.4-0.7: solid but routine; fine to batch-read later\n"
-    "- below 0.4: marginal or noise for this profile\n"
-    "When the user message carries a REVIEW FEEDBACK block, it is ground truth from THIS user — "
-    "real items they kept or discarded. It outranks the generic anchor examples below wherever the "
-    "two disagree; match the taste it shows, not just the topic overlap.\n"
-    "Anchor examples (calibrate against these):\n"
-    "- 0.95: \"Major framework in the user's stack ships a breaking major release with a "
-    'migration guide" — must-see, act soon.\n'
-    '- 0.75: "A library the user monitors ships a minor release with a genuinely useful '
-    'new feature" — worth reading this week.\n'
-    '- 0.55: "Competent tutorial covering a topic in the user\'s stack, nothing novel" — '
-    "batch-read later.\n"
-    '- 0.20: "Generic listicle or old news resurfaced, unrelated to the profile" — noise.\n'
+    "- tags: the technologies and topics it is about.\n"
     "Respond with ONLY a JSON object — no prose before or after."
 )
 
 
-#: Minimum examples on *each* side before feedback is used. One-sided feedback has no
-#: contrast — a wall of approvals just ratchets every score upward — so below this the
-#: block is dropped and the static anchor examples carry the calibration alone.
-_MIN_PER_SIDE = 2
-
-
-def _feedback_block(feedback: list[dict] | None) -> str:
-    """
-    Render past review decisions as few-shot examples of this user's taste.
-
-    Each example is an already-curated item: the LLM's own summary and tags for it,
-    the score it got, and the verdict the human then gave. Returns ``""`` when
-    either side is under :data:`_MIN_PER_SIDE`.
-
-    :param feedback: Dicts with ``decision``/``summary``/``tags``/``score``.
-    :type feedback: list[dict] | None
-    :return: The prompt block, or ``""`` when there is not enough signal.
-    :rtype: str
-    """
-    if not feedback:
-        return ""
-    approved = [f for f in feedback if f["decision"] == "approved"]
-    rejected = [f for f in feedback if f["decision"] == "rejected"]
-    if len(approved) < _MIN_PER_SIDE or len(rejected) < _MIN_PER_SIDE:
-        return ""
-
-    def _lines(rows: list[dict]) -> str:
-        return "\n".join(
-            f"- [{', '.join(r['tags']) or 'no tags'}] {r['summary']} (you scored it {r['score']:.2f})" for r in rows
-        )
-
-    return (
-        "REVIEW FEEDBACK — this user's own past decisions on this same feed:\n"
-        f"APPROVED (kept — score items like these HIGH):\n{_lines(approved)}\n"
-        f"REJECTED (discarded — score items like these LOW):\n{_lines(rejected)}\n\n"
-    )
-
-
-def _user_prompt(item_text: str, profile: dict, context: str = "", feedback: list[dict] | None = None) -> str:
-    """Build the per-item user prompt embedding the profile, feedback, item, context, and contract."""
+def _user_prompt(item_text: str, profile: dict, context: str = "") -> str:
+    """Build the per-item user prompt embedding the profile, item, context, and contract."""
     extra = f"EXTRA CONTEXT:\n{context}\n\n" if context else ""
     return (
         f"TODAY: {date.today().isoformat()}\n\n"
         f"USER PROFILE (stacks/areas/keywords/monitored_libraries):\n{json.dumps(profile, ensure_ascii=False)}\n\n"
-        f"{_feedback_block(feedback)}"
         f"ITEM:\n{item_text}\n\n"
         f"{extra}"
         "Return a JSON object with exactly these keys:\n"
-        "- summary: string — one or two sentences on what this is and why it matters to the user\n"
+        "- summary: string — one or two short sentences (under ~35 words): what it is + the honest verdict\n"
         "- tags: array of short lowercase strings (technologies/topics)\n"
-        "- importance_score: number between 0 and 1 (1 = must-see for this profile)\n"
     )
 
 
@@ -119,10 +61,9 @@ def curate(
     item_text: str,
     profile: dict,
     context: str = "",
-    feedback: list[dict] | None = None,
 ) -> tuple[CurationCreate, dict]:
     """
-    Curate one item against the profile.
+    Describe one item (summary + tags) for the profile.
 
     :param item_text: A compact text rendering of the collected item.
     :type item_text: str
@@ -130,14 +71,12 @@ def curate(
     :type profile: dict
     :param context: Optional enrichment (full article body / web coverage / trending).
     :type context: str
-    :param feedback: Past approve/reject decisions, used as few-shot taste examples.
-    :type feedback: list[dict] | None
     :return: ``(validated_curation, raw_model_output)``.
     :rtype: tuple[CurationCreate, dict]
     :raises CollectorRetriable: Ollama unreachable / 5xx (the task retries).
     :raises CollectorTerminal: Output that won't validate after the call.
     """
-    raw = _call_ollama(_SYSTEM_PROMPT, _user_prompt(item_text, profile, context, feedback))
+    raw = _call_ollama(_SYSTEM_PROMPT, _user_prompt(item_text, profile, context))
     return _coerce(raw), raw
 
 
@@ -161,6 +100,9 @@ def _call_ollama(system: str, user: str) -> dict:
         # Ollama accepts a JSON schema here, which kills most terminal
         # validation failures at the source.
         "format": CurationCreate.model_json_schema(),
+        # No hidden reasoning: summary + tags don't need it, and qwen3's thinking was
+        # ~600 tokens an item — about 10x the latency of the answer itself.
+        "think": False,
         "messages": [
             {"role": "system", "content": system},
             {"role": "user", "content": user},
@@ -194,7 +136,7 @@ def _coerce(raw: dict) -> CurationCreate:
     :type raw: dict
     :return: The validated curation.
     :rtype: CurationCreate
-    :raises CollectorTerminal: If validation fails (missing summary, bad score).
+    :raises CollectorTerminal: If validation fails (missing summary).
     """
     try:
         return CurationCreate.model_validate(raw)

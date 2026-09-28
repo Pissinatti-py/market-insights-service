@@ -61,12 +61,12 @@ async def curation_stats(db: AsyncSession = Depends(get_db_async_session)) -> Cu
 @router.get("/calibration", response_model=CurationCalibration)
 async def curation_calibration(db: AsyncSession = Depends(get_db_async_session)) -> CurationCalibration:
     """
-    How well the LLM's importance score predicts your review decisions.
+    How well the ranker's importance score predicts your review decisions.
 
     Only reviewed, scored rows count. ``separation`` (mean score of approved minus
     mean score of rejected) is the number to watch: it should widen as review
-    feedback feeds back into the curation prompt. Near zero means the score is not
-    discriminating and the feed is effectively unranked for you.
+    verdicts accumulate into the ranker's reference set. Near zero means the score
+    is not discriminating and the feed is effectively unranked for you.
     """
     means, counts = await _repo.calibration(db)
 

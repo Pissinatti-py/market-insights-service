@@ -1,3 +1,5 @@
+import uuid
+
 from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
@@ -13,37 +15,26 @@ SCORE_BANDS = (("0.8-1.0", 0.8), ("0.6-0.8", 0.6), ("0.4-0.6", 0.4), ("0.0-0.4",
 Calibration = tuple[dict[CurationStatus, float], dict[tuple[str, CurationStatus], int]]
 
 
-def recent_decisions_sync(session: Session, limit: int) -> dict[str, list[Curation]]:
+def reviewed_examples_sync(session: Session) -> list[tuple[uuid.UUID, list[float], bool]]:
     """
-    The most recently reviewed approved/rejected curations — the few-shot feedback set.
+    Every human verdict with an embedding — the training set of the importance ranker.
 
-    Runs on the **sync** engine because curation happens inside Celery tasks. The
-    LLM's own ``summary``/``tags``/``importance_score`` on a reviewed row *is* the
-    example, so no extra storage is needed; rows without a summary (dead-lettered
-    ``failed`` ones) carry no usable example text and are skipped.
+    Runs on the **sync** engine because ranking happens inside Celery tasks. Only
+    approved/rejected rows carry a verdict; rows reviewed before they had an
+    embedding join once ``rerank_all`` backfills them.
 
     :param session: Active sync session.
     :type session: Session
-    :param limit: Max examples per decision.
-    :type limit: int
-    :return: ``{"approved": [...], "rejected": [...]}``, newest decision first.
-    :rtype: dict[str, list[Curation]]
+    :return: ``(item_id, embedding, approved)`` per reviewed row.
+    :rtype: list[tuple[uuid.UUID, list[float], bool]]
     """
-
-    def _pick(status: CurationStatus) -> list[Curation]:
-        query = (
-            select(Curation)
-            .where(
-                Curation.status == status,
-                Curation.reviewed_at.is_not(None),
-                Curation.summary.is_not(None),
-            )
-            .order_by(Curation.reviewed_at.desc())
-            .limit(limit)
+    rows = session.execute(
+        select(Curation.item_id, Curation.embedding, Curation.status).where(
+            Curation.status.in_([CurationStatus.APPROVED, CurationStatus.REJECTED]),
+            Curation.embedding.is_not(None),
         )
-        return list(session.execute(query).scalars().all())
-
-    return {"approved": _pick(CurationStatus.APPROVED), "rejected": _pick(CurationStatus.REJECTED)}
+    )
+    return [(item_id, embedding, status == CurationStatus.APPROVED) for item_id, embedding, status in rows]
 
 
 class CurationRepository(BaseManager[Curation]):
@@ -52,7 +43,7 @@ class CurationRepository(BaseManager[Curation]):
 
     async def calibration(self, db: AsyncSession) -> Calibration:
         """
-        Raw material for the calibration report: how the LLM scored what a human
+        Raw material for the calibration report: how the ranker scored what a human
         then approved vs. rejected.
 
         Only reviewed rows with a score participate — ``pending`` has no verdict to
