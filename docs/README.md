@@ -22,8 +22,9 @@ Celery **beat** fires four collectors on a schedule. Each reads the singleton
 **preferences** row (the technical profile) to build its query, fetches from an
 external source, and **upserts** rows keyed by a unique `dedup_key` — so re-runs
 never duplicate. A nightly **curation** task feeds every not-yet-curated item to
-a local **Ollama** LLM, which returns a summary + tags + importance score; the
-result is written as a `pending` curation row. The **API** serves the stored
+a local **Ollama** LLM, which returns a summary + tags; a local ranker scores it
+against your past approve/reject verdicts (embedding kNN), and the result is
+written as a `pending` curation row. The **API** serves the stored
 repos/libraries/articles and lets a human approve or reject each curation. The
 profile and per-source on/off toggles are themselves edited through the API.
 

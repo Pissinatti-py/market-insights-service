@@ -66,28 +66,35 @@ does `INSERT … ON CONFLICT (dedup_key) DO NOTHING` and returns only the newly-
 re-runs are no-ops and curation only chains over new items. Curation is likewise once-per-item via a
 `UniqueConstraint(item_type, item_id)` on `mi__curation`.
 
-**Review decisions feed back into scoring.** Each curation run loads the most recently
-approved/rejected rows (`curation_manager.recent_decisions_sync`) once and passes them to
-`curate()` as few-shot examples of the user's taste — the reviewed row's own summary/tags/score
-*is* the example, which is why this needed no schema change. Two invariants: the block is dropped
-unless **both** sides have ≥2 examples (one-sided feedback just ratchets scores up), and an item
-never gets its own decision back (`recurate_all` would otherwise score approved items against
-themselves and fake `GET /api/curation/calibration`, the metric that says whether any of this
-works). Keyword suggestions (`GET /api/config/keyword-suggestions`) stay read-only on purpose —
+**Review decisions *are* the ranking.** The LLM never scores. `importance_score` comes from the
+local decision model in `src/services/ranker.py`: each item's rendered text is embedded
+(`OLLAMA_EMBED_MODEL`, default `bge-m3`, stored in `mi__curation.embedding`) and scored as the
+similarity-weighted share of its 10 nearest **reviewed** items that were approved
+(`curation_manager.reviewed_examples_sync`). The LLM's own score had AUC 0.41 against review
+verdicts; this ranker has 0.70, leave-one-out. `rerank_all` (every 30 min, no LLM) backfills
+embeddings and re-scores the whole feed, so new reviews reorder it quickly — single-flight, one
+commit per 500-row chunk (a review click never waits on the whole pass), writing only scores that
+moved. Two invariants: under **2 examples on either side** of the whole reference set the score
+falls back to similarity with the profile (one-sided verdicts just ratchet scores up), and an item
+is **never scored against its own verdict**
+(otherwise every reviewed item ranks itself and fakes `GET /api/curation/calibration`, the metric
+that says whether any of this works). Keyword suggestions (`GET /api/config/keyword-suggestions`) stay read-only on purpose —
 the loop is self-reinforcing, so it must not also rewrite what the collectors search for.
 
-**Curation is a two-stage LLM pipeline** (`src/services/agents/`). `enrichment.build_context()`
+**Curation describes with the LLM, then ranks locally** (`src/services/agents/` + `src/services/ranker.py`). `enrichment.build_context()`
 fetches the full article body for articles (`tools/article_reader`, best-effort — a failure drops
 the block, never breaks the run); repos/releases carry their evidence in the rendered item text.
 Then `curation_agent.curate()` sends item + profile + context to Ollama's `/api/chat` (JSON mode,
-schema-constrained) and validates the output through `CurationCreate`. **The curation prompt lives
+schema-constrained, `think: false` — thinking was ~10x the answer's latency) and validates the
+summary + tags through `CurationCreate`; the ranker scores it from the embedding taken for the
+whole batch **before** any LLM call (a missing embed model costs no LLM work). **The curation prompt lives
 only in `curation_agent.py`** — never inline it into a task. Retriable failures (Ollama down/5xx)
 raise `CollectorRetriable` and the task retries; bad output raises `CollectorTerminal` and the item
 is **dead-lettered** as a `status=failed` curation row (never re-selected; `recurate_all` is the
 retry path). A run curates one batch (`CURATION_BATCH_SIZE`, default 50) round-robin across the
 three item types, newest first, then — if it made progress and backlog remains — queues the next
 batch as a **new task** via `send_task`. Deliberately not a loop inside one task: each run stays
-short enough for the lock TTL and the ack-late visibility timeout, and re-reads profile + feedback.
+short enough for the lock TTL and the ack-late visibility timeout, and re-reads profile + verdicts.
 
 **Task-run bookkeeping is automatic.** `src/core/celery/task_runs.py` connects a `task_postrun`
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are

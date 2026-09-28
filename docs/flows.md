@@ -82,7 +82,7 @@ Returns `{"fetched": N, "inserted": M}`.
 
 ## 4. AI curation — `curate_uncurated`
 
-`src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` ·
+`src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` + `src/services/ranker.py` ·
 schedule: **chained after each collection** + daily 02:00 fallback sweep
 
 Curates a batch (`CURATION_BATCH_SIZE`, default 50) **round-robin** across the
@@ -90,31 +90,59 @@ three item types (articles, repositories, library releases), newest first — no
 type can starve the others — then queues the next batch while backlog remains, so
 the whole backlog drains without one task running for hours:
 
-1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
-2. Read **review feedback** once per run: the most recently approved and rejected
-   curations (see "Feeding review decisions back" below).
-3. Interleave rows with **no** curation row yet (`item.id NOT IN
+1. Interleave rows with **no** curation row yet (`item.id NOT IN
    (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the budget.
+   An empty batch ends the run here, without calling Ollama.
+2. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
+3. Load the **ranker's reference set** once per run: every approved/rejected curation
+   with an embedding, plus the embedded profile (see "Feeding review decisions back" below).
+   Then embed the head of every rendered item in the batch (`ranker.EMBED_CHARS`) with
+   `OLLAMA_EMBED_MODEL`, before any LLM call, in requests of `ranker.EMBED_BATCH`. A
+   missing embed model fails the run here (`CollectorRetriable`) before any LLM work is
+   spent, and Ollama never swaps chat/embed models between items.
 4. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
    truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
 5. Render the item (with published/created dates and engagement) and call
-   `curation_agent.curate(text, profile, context, feedback)`:
+   `curation_agent.curate(text, profile, context)`:
    - POSTs to Ollama `/api/chat` constrained to the `CurationCreate` JSON schema
-     (`temperature: 0.1`). The prompt carries a scoring rubric, anchor examples,
-     your past review decisions, and today's date (stale news is capped).
+     (`{summary, tags}`, `temperature: 0.1`, `think: false`). The prompt carries the
+     profile and today's date, so the summary says why it matters and flags old news.
+     The LLM does **not** score.
    - Ollama down / timeout / 5xx → `CollectorRetriable` (task retries).
    - Invalid output → `CollectorTerminal`: a **dead-letter row** is written
      (`status=failed`, error in `raw_llm_output`) so the item is never re-selected;
      `recurate_all` is its retry path.
-6. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
-   the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
-7. If the batch stored anything and uncurated items remain, queue the next run
+6. Rank: score the item's embedding against the reference set (`ranker.score`).
+7. Persist a `Curation` row: `summary`, `tags`, `importance_score` (the ranker's),
+   `embedding`, `status=pending`, the `model` name, and the `raw_llm_output`.
+8. If the batch stored anything and uncurated items remain, queue the next run
    (`send_task`). That re-check also covers items whose own chained run was skipped on
    the lock while this batch ran. The only miss: a trigger landing in the instant between
    the re-check and the lock release — those items wait for the next chained/scheduled run.
    A batch that stored nothing does not requeue, so it can't spin.
 
 Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
+
+## 5. Re-ranking — `rerank_all`
+
+`src/tasks/curation_tasks.py` + `src/services/ranker.py` · schedule: **every 30 min**
+
+Re-scores the whole feed against the latest review verdicts — **no LLM call**:
+
+1. Backfill: embed every non-`failed` curation row whose `embedding` is NULL (rows
+   curated before the ranker, `failed` rows revived by `recurate_all`, or everything
+   after `OLLAMA_EMBED_MODEL` changed and the column was cleared) — 32 per `/api/embed`.
+2. Load the reference set (all embedded verdicts + the embedded profile).
+3. Walk every embedded row in primary-key order, 500 per chunk (keyset, `id > last`):
+   score the chunk with no locks held, UPDATE only the rows whose score moved at the
+   column's precision (3 decimals), and **commit per chunk**. A review click therefore
+   waits on at most one chunk's write, never on the whole scoring pass.
+
+Single-flight (Redis lock `mi:lock:rerank_all`): a run that finds the lock held returns
+`{"skipped": "already running"}`. Otherwise it returns `{"embedded": N, "reranked": M,
+"changed": K}` — `reranked` rows scored, `changed` rows written; a run with no new verdicts
+writes nothing. The cost is pure-Python dot products, O(items × reviews): ~10 s of CPU at
+7k items × 82 reviews, so an approve/reject reorders the feed within 30 minutes.
 
 ### Idempotency, two ways
 
@@ -143,24 +171,26 @@ its curation, it just drops out of the default feed.
 
 Approve/reject is not only bookkeeping: it is the training signal for the next run.
 
-**Into the score.** Each curation run loads the most recently reviewed rows
-(`_FEEDBACK_EXAMPLES` per side, default 6) and passes them to the agent, which renders
-them into the prompt as a `REVIEW FEEDBACK` block — the LLM's own summary, tags, and
-score for each item, plus the verdict you gave it. The system prompt tells the model
-this outranks the static anchor examples. Two guards:
+**Into the score.** Your verdicts *are* the ranking model. `importance_score` is the
+similarity-weighted share of an item's 10 nearest **reviewed** items (in `bge-m3`
+embedding space) that you approved — a local kNN decision model, `src/services/ranker.py`.
+Measured leave-one-out on the first 81 reviews it reached AUC 0.70, where the LLM's own
+score was 0.41 (worse than a coin flip). New items are scored at curation time;
+`rerank_all` re-scores everything every 30 minutes. Two guards:
 
-- **Both sides or nothing.** Under 2 approved *or* under 2 rejected, the block is
-  dropped entirely — one-sided feedback has no contrast and just pushes every score up.
-- **No self-reference.** An item never receives its own past decision as an example,
-  or `recurate_all` would re-score approved items against themselves and make the
-  calibration report below meaningless.
+- **Both sides or nothing.** Under 2 approved *or* under 2 rejected, the neighbours are
+  ignored and the score is the similarity to your profile — one-sided verdicts have no
+  contrast and would just push every score up. It is judged on the whole reference set,
+  so every item in a run is on the same scale.
+- **No self-reference.** An item is never scored against its own verdict, or every
+  reviewed item would rank itself and make the calibration report below meaningless.
 
 **Into the score's credibility.** `GET /api/curation/calibration` reports how the
 model's scores line up with your verdicts: mean score of approved vs. rejected, the
 gap between them (`separation`), and approval rate per score band. Only reviewed,
 scored rows count. Separation near zero means the score is not discriminating and the
-feed is effectively unranked for you; it should widen as feedback accumulates. This is
-the number to check before and after a `recurate_all`.
+feed is effectively unranked for you; it should widen as verdicts accumulate. This is
+the number to check after a `rerank_all`.
 
 **Into what gets collected.** `GET /api/config/keyword-suggestions` mines tags the LLM
 assigned to approved items, drops the ones already in your profile, and ranks the rest
