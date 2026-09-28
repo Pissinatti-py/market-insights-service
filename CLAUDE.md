@@ -66,8 +66,9 @@ does `INSERT … ON CONFLICT (dedup_key) DO NOTHING` and returns only the newly-
 re-runs are no-ops and curation only chains over new items. Curation is likewise once-per-item via a
 `UniqueConstraint(item_type, item_id)` on `mi__curation`.
 
-**Review decisions feed back into scoring.** Each curation run loads the most recently
-approved/rejected rows (`curation_manager.recent_decisions_sync`) once and passes them to
+**Review decisions feed back into scoring.** Each curation page reloads the most recently
+approved/rejected rows (`curation_manager.recent_decisions_sync`), so a long drain keeps up with
+reviews made while it runs, and passes them to
 `curate()` as few-shot examples of the user's taste — the reviewed row's own summary/tags/score
 *is* the example, which is why this needed no schema change. Two invariants: the block is dropped
 unless **both** sides have ≥2 examples (one-sided feedback just ratchets scores up), and an item

@@ -11,7 +11,7 @@ A run drains the whole backlog (newest first, page by page), so a skipped run
 loses nothing — the run holding the lock picks those items up before it exits.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
-Past approve/reject decisions are loaded once per run and passed to the agent as
+Past approve/reject decisions are reloaded every page and passed to the agent as
 few-shot examples, so scoring calibrates against real taste rather than only the
 static anchors in the prompt.
 """
@@ -19,7 +19,7 @@ static anchors in the prompt.
 from __future__ import annotations
 
 from redis import Redis
-from redis.exceptions import RedisError
+from redis.exceptions import LockNotOwnedError, RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -114,7 +114,7 @@ _FEEDBACK_EXAMPLES = 6
 
 def _load_feedback(session) -> list[dict]:
     """
-    Past review decisions as few-shot examples, loaded **once per run**.
+    Past review decisions as few-shot examples, loaded once per page, not per item.
 
     Flat list so the agent stays free of model imports — it only ever sees dicts.
 
@@ -247,10 +247,10 @@ def curate_uncurated(self) -> dict:
 
     try:
         with SyncSession() as session:
-            profile = _load_profile(session)
-            feedback = _load_feedback(session)
-
             while True:
+                # Per page: a drain can outlive many review decisions.
+                profile = _load_profile(session)
+                feedback = _load_feedback(session)
                 # Re-select per page so items collected mid-drain still go newest first.
                 batch = _next_batch(session, settings.CURATION_BATCH_SIZE)
                 page = [(item_type, item) for item_type, item in batch if (item_type, item.id) not in seen]
@@ -265,6 +265,9 @@ def curate_uncurated(self) -> dict:
                 if lock:
                     try:
                         lock.reacquire()  # a full drain can outlive the TTL; keep single-flight
+                    except LockNotOwnedError:
+                        logger.warning("curate_uncurated: lost the lock mid-drain, the new holder drains the rest")
+                        break
                     except RedisError as exc:
                         logger.warning(f"curate_uncurated: could not extend lock: {exc}")
     finally:

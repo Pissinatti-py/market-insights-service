@@ -92,8 +92,11 @@ others. Each page is re-selected, so items a collector lands mid-drain go ahead 
 older backlog. The Redis lock is extended after every page, so a run that fires while a
 drain is going skips and loses nothing:
 
+Steps 1–2 are re-read at the start of every page, so preference edits and reviews made
+during a long drain apply to the rest of it.
+
 1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
-2. Read **review feedback** once per run: the most recently approved and rejected
+2. Read **review feedback**: the most recently approved and rejected
    curations (see "Feeding review decisions back" below).
 3. Interleave rows with **no** curation row yet (`item.id NOT IN
    (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the page size; repeat until nothing is left.

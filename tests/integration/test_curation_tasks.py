@@ -340,3 +340,25 @@ def test_drain_stops_when_rows_never_store(db_session, monkeypatch):
     monkeypatch.setattr(curation_tasks, "_store", lambda session, row: False)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 5)
     assert curation_tasks.curate_uncurated.apply().get() == {"curated": 0, "failed": 0}
+
+
+def test_decisions_made_mid_drain_reach_later_pages(db_session, monkeypatch):
+    """A drain can run for hours — reviews made meanwhile must calibrate the rest of it."""
+    with SyncSession() as session:
+        _seed_aged_articles(session, ["a1", "a2", "a3"])
+
+    feedbacks: list[list[dict]] = []
+
+    def _curate(item_text, profile, context="", feedback=None):
+        if not feedbacks:  # the user reviews while page 1 is being curated
+            with SyncSession() as session:
+                _seed_reviewed(session, "late-keep", CurationStatus.APPROVED, "reviewed mid-drain")
+        feedbacks.append(feedback)
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
+    monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
+    curation_tasks.curate_uncurated.apply().get()
+
+    summaries = [[f["summary"] for f in fb] for fb in feedbacks]
+    assert summaries == [[], [], ["reviewed mid-drain"]]
