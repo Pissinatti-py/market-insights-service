@@ -27,4 +27,9 @@ beat_schedule: dict = {
         "task": "src.tasks.curation_tasks.curate_uncurated",
         "schedule": crontab(minute=0, hour=2),
     },
+    # Re-score the feed against the latest review verdicts (no LLM) — every 30 minutes.
+    "rerank": {
+        "task": "src.tasks.curation_tasks.rerank_all",
+        "schedule": crontab(minute="*/30"),
+    },
 }

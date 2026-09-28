@@ -64,7 +64,7 @@ at the same Postgres; the models are shared.
    (preferences)          │                                      │
                           ▼  fetch + rank                        ▼  for each uncurated item
         GitHub / PyPI / npm / Dev.to / HN / Medium         Ollama /api/chat
-                          │  bulk_upsert_dedup                   │  summary + tags + score
+                          │  bulk_upsert_dedup                   │  summary + tags, then ranker score
                           ▼  (ON CONFLICT DO NOTHING)            ▼  validate via CurationCreate
                      ┌──────────────── PostgreSQL ─────────────────┐
                      │  mi__repositories (+ snapshots)             │
@@ -85,8 +85,10 @@ at the same Postgres; the models are shared.
    **Any insert immediately chains `curate_uncurated`.**
 4. **curate_uncurated** (chained + daily 02:00 sweep) finds items with no curation
    row round-robin across types, enriches articles with their full body, and asks
-   the LLM (via `curation_agent.curate`) for a summary/tags/score. Valid output
-   becomes a `pending` `mi__curation` row; invalid output dead-letters as `failed`.
+   the LLM (via `curation_agent.curate`) for a summary and tags; the ranker
+   (`services/ranker.py`) embeds the item and scores it against past review
+   verdicts. Valid output becomes a `pending` `mi__curation` row; invalid output
+   dead-letters as `failed`. `rerank_all` re-scores the feed every 30 min, no LLM.
 5. **Clients** read the ranked feed (`GET /api/feed`, default pending+approved) or
    the review UI at `/`; a **reviewer** approves/rejects each curation and edits
    the profile/toggles that steer future runs.

@@ -105,10 +105,11 @@ curl "localhost:8003/api/feed/digest?days=7&min_score=0.6&format=markdown"
 | Method | Path | Notes |
 |---|---|---|
 | GET | `/api/tasks` | The triggerable tasks: short name → full Celery name. |
-| POST | `/api/tasks/{task_name}/trigger` | Enqueue a periodic task **now** (HTTP face of `make trigger`). Whitelisted short names only (`collect_trending`, `collect_releases`, `collect_articles`, `curate_uncurated`, `recurate_all`); `404` otherwise. Returns `202 {task, task_id, state: queued}` — the outcome lands in `/status`. |
+| POST | `/api/tasks/{task_name}/trigger` | Enqueue a periodic task **now** (HTTP face of `make trigger`). Whitelisted short names only (`collect_trending`, `collect_releases`, `collect_articles`, `curate_uncurated`, `recurate_all`, `rerank_all`); `404` otherwise. Returns `202 {task, task_id, state: queued}` — the outcome lands in `/status`. |
 
-> `recurate_all` re-runs curation over **every** existing row with the current
+> `recurate_all` re-runs the LLM description over **every** existing row with the current
 > prompt/logic (also the retry path for `failed` rows) — use after prompt changes.
+> `rerank_all` re-scores every row with the ranker (no LLM) and backfills missing embeddings.
 
 ## Configuration — `/api/config`
 

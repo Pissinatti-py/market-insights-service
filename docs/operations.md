@@ -54,7 +54,8 @@ Task names: `src.tasks.github_tasks.collect_trending`,
 `src.tasks.packages_tasks.collect_releases`,
 `src.tasks.articles_tasks.collect_articles`,
 `src.tasks.curation_tasks.curate_uncurated`,
-`src.tasks.curation_tasks.recurate_all`.
+`src.tasks.curation_tasks.recurate_all`,
+`src.tasks.curation_tasks.rerank_all`.
 
 Watch the worker: `docker compose logs -f celery`.
 

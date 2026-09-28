@@ -17,7 +17,8 @@ Docker image) so it can later drop into that network unchanged.
 | `collect_trending` | GitHub Search API | every 6h |
 | `collect_releases` | PyPI + npm registries | daily 12:00 |
 | `collect_articles` | Dev.to API + Hacker News (Algolia) + Medium tag RSS | every 12h |
-| `curate_uncurated` | Ollama LLM curation | chained after each collection + daily 02:00 sweep |
+| `curate_uncurated` | Ollama LLM summary/tags + local ranker score | chained after each collection + daily 02:00 sweep |
+| `rerank_all` | Local ranker only (no LLM) — re-scores the feed against your latest verdicts | every 30 min |
 
 Every collected row carries a unique `dedup_key`; collectors upsert with
 `INSERT … ON CONFLICT DO NOTHING`, so re-runs are idempotent. Curation is also
@@ -30,8 +31,8 @@ Consume the result at **`GET /`** (single-page review UI: ranked feed, filters,
 approve/reject) or **`GET /api/feed`** (same data over JSON, default
 pending + approved).
 
-Approving and rejecting is not just bookkeeping — it feeds back. Each curation run
-passes your most recent decisions to the LLM as examples of your actual taste,
+Approving and rejecting is not just bookkeeping — it *is* the ranking. A local
+decision model scores each item by how you judged its nearest reviewed neighbours,
 `GET /api/curation/calibration` reports whether the scores are tracking those
 decisions, and `GET /api/config/keyword-suggestions` mines approved items' tags for
 search terms worth adding to the profile. See
@@ -45,7 +46,7 @@ One self-contained page (`src/static/index.html`, no build step) served at
 ![Review UI — ranked feed with per-item score gauge, filters, and one-click review](docs/images/review-ui.png)
 
 - **Ranked feed** across repos, releases, and articles — the segment gauge and
-  score reflect the LLM's `importance_score` against your profile.
+  score reflect the ranker's `importance_score` — learned from your approve/reject verdicts.
 - **Filters** for status, item type, minimum score, and tag (click any tag to
   filter by it).
 - **One-click review** (`approve` / `reject`) and live stats per status, including

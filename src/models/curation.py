@@ -3,9 +3,9 @@ import uuid
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import DateTime, Numeric, String, Text, UniqueConstraint
+from sqlalchemy import REAL, DateTime, Numeric, String, Text, UniqueConstraint
 from sqlalchemy import Enum as SAEnum
-from sqlalchemy.dialects.postgresql import JSONB, UUID
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB, UUID
 from sqlalchemy.orm import Mapped, mapped_column
 
 from src.db.base import Base
@@ -61,6 +61,9 @@ class Curation(TimestampMixin, Base):
     summary: Mapped[str | None] = mapped_column(Text, nullable=True)
     tags: Mapped[list] = mapped_column(JSONB, nullable=False, default=list)
     importance_score: Mapped[Decimal | None] = mapped_column(Numeric(4, 3), nullable=True, index=True)
+    # Unit vector of the rendered item from OLLAMA_EMBED_MODEL — what the ranker scores
+    # importance_score from. Deferred: ~4 KB a row that no API response ever needs.
+    embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL), nullable=True, deferred=True)
 
     status: Mapped[CurationStatus] = mapped_column(
         SAEnum(CurationStatus, name="curation_status_enum", values_callable=lambda obj: [e.value for e in obj]),

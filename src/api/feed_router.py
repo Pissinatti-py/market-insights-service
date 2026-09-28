@@ -3,7 +3,7 @@ Unified feed — the product face of the pipeline.
 
 One call returns curated signals across all three item tables (repositories,
 library releases, articles), joined with their curation row, ranked by the
-LLM's importance score. Defaults to pending + approved — rejected/failed items
+ranker's importance score. Defaults to pending + approved — rejected/failed items
 never surface unless explicitly requested via ``?status=``.
 """
 
@@ -121,7 +121,7 @@ async def feed(
         per_page=per_page,
         filters=filters,
         expressions=expressions,
-        order_by=order_by,
+        order_by=f"{order_by},-created_at",  # ranker scores tie often (1.000) — newest wins
     )
     items = _to_feed_items(result.items, await _render_items(db, result.items))
     return Page.from_result(result, items=items)
@@ -183,7 +183,7 @@ async def digest(
         per_page=limit,
         filters={"status": [CurationStatus.PENDING, CurationStatus.APPROVED]},
         expressions=expressions,
-        order_by="-importance_score",
+        order_by="-importance_score,-created_at",
     )
     items = _to_feed_items(result.items, await _render_items(db, result.items))
 
