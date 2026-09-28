@@ -20,6 +20,7 @@ TRIGGERABLE_TASKS = {
     "collect_articles": "src.tasks.articles_tasks.collect_articles",
     "curate_uncurated": "src.tasks.curation_tasks.curate_uncurated",
     "recurate_all": "src.tasks.curation_tasks.recurate_all",
+    "rerank_all": "src.tasks.curation_tasks.rerank_all",
 }
 
 
