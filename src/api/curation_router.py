@@ -37,7 +37,9 @@ async def list_curation(
     if item_type is not None:
         filters["item_type"] = item_type
 
-    result = await _repo.paginate(db, page=page, per_page=per_page, order_by="-importance_score", filters=filters)
+    result = await _repo.paginate(
+        db, page=page, per_page=per_page, order_by="-importance_score,-created_at", filters=filters
+    )
 
     return Page.from_result(result, items=[CurationRead.model_validate(c) for c in result.items])
 

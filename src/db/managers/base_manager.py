@@ -136,7 +136,9 @@ class BaseManager(Generic[ModelType]):
             if not hasattr(self.model, field_name):
                 raise ValueError(f"unknown order field {field_name!r} for {self.model.__name__}")
             field = getattr(self.model, field_name)
-            columns.append(field.desc() if descending else field.asc())
+            # NULLs last both ways (PostgreSQL puts them first on DESC): an unscored or
+            # unreviewed row must not outrank every real value.
+            columns.append(field.desc().nulls_last() if descending else field.asc())
         return columns
 
     async def get_multi(
@@ -162,9 +164,8 @@ class BaseManager(Generic[ModelType]):
         """
         query = select(self.model)
         query = self._apply_filters(query, filters, expressions)
-        order_columns = self._order_columns(order_by)
-        if order_columns:
-            query = query.order_by(*order_columns)
+        # The primary key breaks ties, so LIMIT/OFFSET pages never overlap or skip rows.
+        query = query.order_by(*self._order_columns(order_by), self.model.id)
         query = query.offset(skip).limit(limit)
         result = await db.execute(query)
         return list(result.scalars().all())

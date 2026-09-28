@@ -262,6 +262,23 @@ async def test_feed_orders_by_reviewed_at(client: AsyncClient, db_session: Async
 
 
 @pytest.mark.asyncio
+async def test_feed_puts_unscored_last_and_breaks_ties_newest_first(client: AsyncClient, db_session: AsyncSession):
+    """A revived dead letter has no score until rerank_all — it must not jump the whole feed."""
+    now = datetime.now(timezone.utc)
+    seeded = [("Unscored", None, 0), ("Tie older", 1.0, 2), ("Tie newer", 1.0, 1), ("Low", 0.2, 3)]
+    for title, score, days_old in seeded:
+        article = await _seed_article(db_session, title=title, url=f"https://blog.example.com/{days_old}")
+        cur = await _seed_curation(
+            db_session, CurationItemType.ARTICLE, article.id, score, status=CurationStatus.PENDING
+        )
+        cur.created_at = now - timedelta(days=days_old)
+    await db_session.commit()
+
+    items = (await client.get("/api/feed")).json()["items"]
+    assert [i["title"] for i in items] == ["Tie newer", "Tie older", "Low", "Unscored"]
+
+
+@pytest.mark.asyncio
 async def test_preferences_roundtrip(client: AsyncClient):
     empty = (await client.get("/api/config/preferences")).json()
     assert empty["stacks"] == []
