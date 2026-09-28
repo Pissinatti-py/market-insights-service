@@ -52,7 +52,7 @@ are dropped.
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | A host-side daemon reached from the container. Point at any OpenAI-compatible `/api/chat` to swap providers. |
 | `OLLAMA_MODEL` | `qwen3:14b-q8_0` | Also stamped onto each curation row. |
 | `OLLAMA_REQUEST_TIMEOUT_SECONDS` | `120.0` | |
-| `CURATION_BATCH_SIZE` | `50` | Page size for `curate_uncurated` (round-robin across types per page). A run keeps paging until the backlog is empty. |
+| `CURATION_BATCH_SIZE` | `50` | Items curated per `curate_uncurated` run (round-robin across types). A run that leaves backlog queues the next one. |
 | `ARTICLE_MAX_CHARS` | `6000` | Truncation cap for full article bodies fetched at curation time. |
 | `ARTICLE_MAX_AGE_DAYS` | `14` | Articles older than this never enter the pipeline. |
 

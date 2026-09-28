@@ -85,21 +85,16 @@ Returns `{"fetched": N, "inserted": M}`.
 `src/tasks/curation_tasks.py` + `src/services/agents/curation_agent.py` ·
 schedule: **chained after each collection** + daily 02:00 fallback sweep
 
-Drains the **whole** uncurated backlog in one run, newest first, in pages of
-`CURATION_BATCH_SIZE` (default 50). Each page is interleaved **round-robin** across the
-three item types (articles, repositories, library releases), so no type can starve the
-others. Each page is re-selected, so items a collector lands mid-drain go ahead of the
-older backlog. The Redis lock is extended after every page, so a run that fires while a
-drain is going skips and loses nothing:
-
-Steps 1–2 are re-read at the start of every page, so preference edits and reviews made
-during a long drain apply to the rest of it.
+Curates a batch (`CURATION_BATCH_SIZE`, default 50) **round-robin** across the
+three item types (articles, repositories, library releases), newest first — no
+type can starve the others — then queues the next batch while backlog remains, so
+the whole backlog drains without one task running for hours:
 
 1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
-2. Read **review feedback**: the most recently approved and rejected
+2. Read **review feedback** once per run: the most recently approved and rejected
    curations (see "Feeding review decisions back" below).
 3. Interleave rows with **no** curation row yet (`item.id NOT IN
-   (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the page size; repeat until nothing is left.
+   (SELECT item_id FROM mi__curation WHERE item_type = …)`), one per type, up to the budget.
 4. Enrich: articles get their full body fetched (`article_reader`, trafilatura,
    truncated to `ARTICLE_MAX_CHARS`) — best-effort, a fetch failure just drops the block.
 5. Render the item (with published/created dates and engagement) and call
@@ -113,6 +108,11 @@ during a long drain apply to the rest of it.
      `recurate_all` is its retry path.
 6. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
    the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
+7. If the batch stored anything and uncurated items remain, queue the next run
+   (`send_task`). That re-check also covers items whose own chained run was skipped on
+   the lock while this batch ran. The only miss: a trigger landing in the instant between
+   the re-check and the lock release — those items wait for the next chained/scheduled run.
+   A batch that stored nothing does not requeue, so it can't spin.
 
 Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
 

@@ -68,6 +68,24 @@ def _no_enrichment(monkeypatch):
     monkeypatch.setattr(curation_tasks, "build_context", lambda item_type, item: "")
 
 
+@pytest.fixture(autouse=True)
+def requeued(monkeypatch) -> list[str]:
+    """Record the follow-up runs a batch queues instead of hitting the broker."""
+    sent: list[str] = []
+    monkeypatch.setattr(curation_tasks.celery_app, "send_task", lambda name, *a, **kw: sent.append(name))
+    return sent
+
+
+def _drain(requeued: list[str]) -> list[dict]:
+    """Run curate_uncurated, then every follow-up it queues, like the worker would."""
+    results = []
+    while True:
+        queued = len(requeued)
+        results.append(curation_tasks.curate_uncurated.apply().get())
+        if len(requeued) == queued:
+            return results
+
+
 def _ok_curate(item_text, profile, context="", feedback=None):
     return CurationCreate(summary="ok", tags=["x"], importance_score=0.5), {"summary": "ok"}
 
@@ -262,7 +280,7 @@ def test_recurate_never_feeds_an_item_its_own_decision(db_session, monkeypatch):
     assert "another keeper" in [f["summary"] for f in own_run]
 
 
-def test_batch_round_robins_across_types(db_session, monkeypatch):
+def test_batch_round_robins_across_types(db_session, monkeypatch, requeued):
     with SyncSession() as session:
         for i in range(2):
             _seed_article(session, f"art-{i}")
@@ -272,12 +290,14 @@ def test_batch_round_robins_across_types(db_session, monkeypatch):
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 3)
     result = curation_tasks.curate_uncurated.apply().get()
-    assert result == {"curated": 6, "failed": 0}
+    assert result == {"curated": 3, "failed": 0}
 
     with SyncSession() as session:
-        first_page = session.query(Curation).order_by(Curation.created_at).limit(3).all()
-        # One of each in the first page — articles cannot starve the other types.
-        assert sorted(c.item_type.value for c in first_page) == ["article", "library_release", "repository"]
+        types = [c.item_type for c in session.query(Curation).all()]
+        # One of each — articles cannot starve the other types.
+        assert sorted(t.value for t in types) == ["article", "library_release", "repository"]
+    # Three are left, so the batch queues the next run instead of looping in this one.
+    assert requeued == ["src.tasks.curation_tasks.curate_uncurated"]
 
 
 def _seed_aged_articles(session, titles: list[str]) -> None:
@@ -296,21 +316,20 @@ def _recording_curate(order: list[str]):
     return _curate
 
 
-def test_single_run_drains_whole_backlog_newest_first(db_session, monkeypatch):
+def test_backlog_drains_newest_first_across_requeued_runs(db_session, monkeypatch, requeued):
     with SyncSession() as session:
         _seed_aged_articles(session, ["a1", "a2", "a3", "a4", "a5"])
 
     order: list[str] = []
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _recording_curate(order))
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
-    result = curation_tasks.curate_uncurated.apply().get()
 
-    # Backlog is 2.5× the page size, yet one run curates all of it, newest first.
-    assert result == {"curated": 5, "failed": 0}
+    # Backlog is 2.5× the batch: each run takes one batch and queues the next until empty.
+    assert _drain(requeued) == [{"curated": 2, "failed": 0}, {"curated": 2, "failed": 0}, {"curated": 1, "failed": 0}]
     assert order == ["a5", "a4", "a3", "a2", "a1"]
 
 
-def test_items_collected_mid_drain_jump_the_older_backlog(db_session, monkeypatch):
+def test_items_collected_mid_drain_jump_the_older_backlog(db_session, monkeypatch, requeued):
     with SyncSession() as session:
         _seed_aged_articles(session, ["old-1", "old-2", "old-3"])
 
@@ -318,21 +337,38 @@ def test_items_collected_mid_drain_jump_the_older_backlog(db_session, monkeypatc
     record = _recording_curate(order)
 
     def _curate(item_text, profile, context="", feedback=None):
-        if not order:  # a collector lands a fresh item while page 1 is being curated
+        if not order:  # a collector lands a fresh item while batch 1 is being curated
             with SyncSession() as session:
                 _seed_article(session, "fresh")
         return record(item_text, profile, context)
 
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
-    result = curation_tasks.curate_uncurated.apply().get()
+    _drain(requeued)
 
-    assert result == {"curated": 4, "failed": 0}
     assert order == ["old-3", "old-2", "fresh", "old-1"]
 
 
-def test_drain_stops_when_rows_never_store(db_session, monkeypatch):
-    """An item whose insert keeps failing is re-selected every page — the run must end, not spin."""
+def test_items_landing_during_a_partial_batch_are_requeued(db_session, monkeypatch, requeued):
+    """Their own chained run skipped on the lock — the holder's backlog re-check must catch them."""
+    with SyncSession() as session:
+        _seed_article(session, "only")
+
+    def _curate(item_text, profile, context="", feedback=None):
+        if "'only'" in item_text:
+            with SyncSession() as session:
+                _seed_article(session, "late")
+        return _ok_curate(item_text, profile, context)
+
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
+    monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 5)
+
+    # The batch was not full, yet "late" is still picked up by a queued follow-up.
+    assert _drain(requeued) == [{"curated": 1, "failed": 0}, {"curated": 1, "failed": 0}]
+
+
+def test_no_requeue_when_nothing_stores(db_session, monkeypatch, requeued):
+    """Rows that never store stay uncurated — requeueing on them would spin forever."""
     with SyncSession() as session:
         _seed_aged_articles(session, ["stuck-1", "stuck-2"])
 
@@ -340,17 +376,18 @@ def test_drain_stops_when_rows_never_store(db_session, monkeypatch):
     monkeypatch.setattr(curation_tasks, "_store", lambda session, row: False)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 5)
     assert curation_tasks.curate_uncurated.apply().get() == {"curated": 0, "failed": 0}
+    assert requeued == []
 
 
-def test_decisions_made_mid_drain_reach_later_pages(db_session, monkeypatch):
-    """A drain can run for hours — reviews made meanwhile must calibrate the rest of it."""
+def test_decisions_made_mid_drain_reach_later_runs(db_session, monkeypatch, requeued):
+    """A backlog drains over many runs — reviews made meanwhile must calibrate the rest of it."""
     with SyncSession() as session:
         _seed_aged_articles(session, ["a1", "a2", "a3"])
 
     feedbacks: list[list[dict]] = []
 
     def _curate(item_text, profile, context="", feedback=None):
-        if not feedbacks:  # the user reviews while page 1 is being curated
+        if not feedbacks:  # the user reviews while batch 1 is being curated
             with SyncSession() as session:
                 _seed_reviewed(session, "late-keep", CurationStatus.APPROVED, "reviewed mid-drain")
         feedbacks.append(feedback)
@@ -358,7 +395,7 @@ def test_decisions_made_mid_drain_reach_later_pages(db_session, monkeypatch):
 
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _curate)
     monkeypatch.setattr(curation_tasks.settings, "CURATION_BATCH_SIZE", 2)
-    curation_tasks.curate_uncurated.apply().get()
+    _drain(requeued)
 
     summaries = [[f["summary"] for f in fb] for fb in feedbacks]
     assert summaries == [[], [], ["reviewed mid-drain"]]

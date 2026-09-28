@@ -66,9 +66,8 @@ does `INSERT … ON CONFLICT (dedup_key) DO NOTHING` and returns only the newly-
 re-runs are no-ops and curation only chains over new items. Curation is likewise once-per-item via a
 `UniqueConstraint(item_type, item_id)` on `mi__curation`.
 
-**Review decisions feed back into scoring.** Each curation page reloads the most recently
-approved/rejected rows (`curation_manager.recent_decisions_sync`), so a long drain keeps up with
-reviews made while it runs, and passes them to
+**Review decisions feed back into scoring.** Each curation run loads the most recently
+approved/rejected rows (`curation_manager.recent_decisions_sync`) once and passes them to
 `curate()` as few-shot examples of the user's taste — the reviewed row's own summary/tags/score
 *is* the example, which is why this needed no schema change. Two invariants: the block is dropped
 unless **both** sides have ≥2 examples (one-sided feedback just ratchets scores up), and an item
@@ -85,9 +84,10 @@ schema-constrained) and validates the output through `CurationCreate`. **The cur
 only in `curation_agent.py`** — never inline it into a task. Retriable failures (Ollama down/5xx)
 raise `CollectorRetriable` and the task retries; bad output raises `CollectorTerminal` and the item
 is **dead-lettered** as a `status=failed` curation row (never re-selected; `recurate_all` is the
-retry path). A run drains the **whole** backlog, newest first, in pages of `CURATION_BATCH_SIZE`
-(default 50), each round-robin across the three item types. Every page is re-selected, so fresh
-items jump the older backlog, and the lock is extended per page so a long drain stays single-flight.
+retry path). A run curates one batch (`CURATION_BATCH_SIZE`, default 50) round-robin across the
+three item types, newest first, then — if it made progress and backlog remains — queues the next
+batch as a **new task** via `send_task`. Deliberately not a loop inside one task: each run stays
+short enough for the lock TTL and the ack-late visibility timeout, and re-reads profile + feedback.
 
 **Task-run bookkeeping is automatic.** `src/core/celery/task_runs.py` connects a `task_postrun`
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are

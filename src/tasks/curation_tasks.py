@@ -7,11 +7,13 @@ Every collector chains this task, so runs overlap: a Redis single-flight lock
 skips a run while another is draining, and the ``(item_type, item_id)`` unique
 constraint is tolerated per item (skip, not crash) so a lost race never kills
 the batch or duplicates LLM work for long.
-A run drains the whole backlog (newest first, page by page), so a skipped run
-loses nothing — the run holding the lock picks those items up before it exits.
+Each run curates one batch and queues the next while backlog remains, so a run
+skipped on the lock rarely loses anything: the holder re-checks the backlog after
+its batch. Only a trigger landing in the instant between that check and the lock
+release is missed, and those items wait for the next chained/scheduled run.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
-Past approve/reject decisions are reloaded every page and passed to the agent as
+Past approve/reject decisions are loaded once per run and passed to the agent as
 few-shot examples, so scoring calibrates against real taste rather than only the
 static anchors in the prompt.
 """
@@ -19,7 +21,7 @@ static anchors in the prompt.
 from __future__ import annotations
 
 from redis import Redis
-from redis.exceptions import LockNotOwnedError, RedisError
+from redis.exceptions import RedisError
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 
@@ -114,7 +116,7 @@ _FEEDBACK_EXAMPLES = 6
 
 def _load_feedback(session) -> list[dict]:
     """
-    Past review decisions as few-shot examples, loaded once per page, not per item.
+    Past review decisions as few-shot examples, loaded **once per run**.
 
     Flat list so the agent stays free of model imports — it only ever sees dicts.
 
@@ -147,7 +149,7 @@ def _curate_one(item_type: CurationItemType, item, profile: dict, feedback: list
 
 
 _LOCK_KEY = "mi:lock:curate_uncurated"
-_LOCK_TTL_SECONDS = 3 * 60 * 60  # per page — reacquired after each one, so a long drain never expires it
+_LOCK_TTL_SECONDS = 3 * 60 * 60  # comfortably above a worst-case batch (200 items × ~35 s LLM + enrichment)
 
 
 def _acquire_curation_lock():
@@ -225,12 +227,13 @@ def _curate_page(session, page, profile: dict, feedback: list[dict]) -> tuple[in
 )
 def curate_uncurated(self) -> dict:
     """
-    Drain the **whole** uncurated backlog in one run, newest first, in pages of
-    ``CURATION_BATCH_SIZE``. Each page is re-selected, so items collected while
-    the drain is running jump ahead of the older backlog instead of waiting for
-    another run. Types are interleaved round-robin so articles cannot starve
-    repos/releases. Single-flight: if another run is already draining, this one
-    skips — the lock is extended after every page, so a long drain keeps it.
+    Curate one batch of ``CURATION_BATCH_SIZE`` uncurated items, newest first, then
+    queue the next batch as a **new task** while any backlog is left. Each task stays
+    short — under the lock TTL and the broker's ack-late visibility timeout, and it
+    re-reads profile + feedback — instead of one run looping for hours. Types are
+    interleaved round-robin so articles cannot starve repos/releases. Single-flight:
+    if another run holds the lock this one skips; the holder re-checks the backlog
+    after its batch, so items that landed meanwhile are queued, not stranded.
 
     :return: ``{"curated": int, "failed": int}`` (failed = dead-lettered invalid
         output), or ``{"skipped": "already running"}``.
@@ -241,35 +244,15 @@ def curate_uncurated(self) -> dict:
         logger.info("curate_uncurated: another run holds the lock, skipping")
         return {"skipped": "already running"}
 
-    curated = 0
-    failed = 0
-    seen: set = set()
-
     try:
         with SyncSession() as session:
-            while True:
-                # Per page: a drain can outlive many review decisions.
-                profile = _load_profile(session)
-                feedback = _load_feedback(session)
-                # Re-select per page so items collected mid-drain still go newest first.
-                batch = _next_batch(session, settings.CURATION_BATCH_SIZE)
-                page = [(item_type, item) for item_type, item in batch if (item_type, item.id) not in seen]
-                if not page:
-                    # Empty backlog — or every row came back again (its insert failed
-                    # for a reason other than the unique constraint): stop, don't spin.
-                    break
-                seen.update((item_type, item.id) for item_type, item in page)
-                curated_delta, failed_delta = _curate_page(session, page, profile, feedback)
-                curated += curated_delta
-                failed += failed_delta
-                if lock:
-                    try:
-                        lock.reacquire()  # a full drain can outlive the TTL; keep single-flight
-                    except LockNotOwnedError:
-                        logger.warning("curate_uncurated: lost the lock mid-drain, the new holder drains the rest")
-                        break
-                    except RedisError as exc:
-                        logger.warning(f"curate_uncurated: could not extend lock: {exc}")
+            profile = _load_profile(session)
+            feedback = _load_feedback(session)
+            batch = _next_batch(session, settings.CURATION_BATCH_SIZE)
+            curated, failed = _curate_page(session, batch, profile, feedback)
+            # No progress means every insert lost (a concurrent unlocked run owns them,
+            # or they can never store) — stop rather than requeue forever.
+            more = bool(curated + failed) and bool(_next_batch(session, 1))
     finally:
         if lock:
             try:
@@ -277,7 +260,9 @@ def curate_uncurated(self) -> dict:
             except RedisError:
                 pass  # lock expired mid-run; _store already tolerated any overlap
 
-    logger.info(f"curate_uncurated: curated {curated}, failed {failed}")
+    logger.info(f"curate_uncurated: curated {curated}, failed {failed}, more backlog: {more}")
+    if more:
+        celery_app.send_task("src.tasks.curation_tasks.curate_uncurated")
     return {"curated": curated, "failed": failed}
 
 
