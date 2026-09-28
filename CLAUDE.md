@@ -84,8 +84,10 @@ schema-constrained) and validates the output through `CurationCreate`. **The cur
 only in `curation_agent.py`** — never inline it into a task. Retriable failures (Ollama down/5xx)
 raise `CollectorRetriable` and the task retries; bad output raises `CollectorTerminal` and the item
 is **dead-lettered** as a `status=failed` curation row (never re-selected; `recurate_all` is the
-retry path). The batch (`CURATION_BATCH_SIZE`, default 50) is drained round-robin across the three
-item types, newest first.
+retry path). A run curates one batch (`CURATION_BATCH_SIZE`, default 50) round-robin across the
+three item types, newest first, then — if it made progress and backlog remains — queues the next
+batch as a **new task** via `send_task`. Deliberately not a loop inside one task: each run stays
+short enough for the lock TTL and the ack-late visibility timeout, and re-reads profile + feedback.
 
 **Task-run bookkeeping is automatic.** `src/core/celery/task_runs.py` connects a `task_postrun`
 signal that writes one `mi__task_runs` row per finished task (success or failure) — new tasks are

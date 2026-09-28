@@ -87,7 +87,8 @@ schedule: **chained after each collection** + daily 02:00 fallback sweep
 
 Curates a batch (`CURATION_BATCH_SIZE`, default 50) **round-robin** across the
 three item types (articles, repositories, library releases), newest first — no
-type can starve the others:
+type can starve the others — then queues the next batch while backlog remains, so
+the whole backlog drains without one task running for hours:
 
 1. Read profile → `{stacks, areas, keywords, monitored_libraries}`.
 2. Read **review feedback** once per run: the most recently approved and rejected
@@ -107,6 +108,11 @@ type can starve the others:
      `recurate_all` is its retry path.
 6. Persist a `Curation` row: `summary`, `tags`, `importance_score`, `status=pending`,
    the `model` name, and the `raw_llm_output` (kept in JSONB for debugging).
+7. If the batch stored anything and uncurated items remain, queue the next run
+   (`send_task`). That re-check also covers items whose own chained run was skipped on
+   the lock while this batch ran. The only miss: a trigger landing in the instant between
+   the re-check and the lock release — those items wait for the next chained/scheduled run.
+   A batch that stored nothing does not requeue, so it can't spin.
 
 Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
 

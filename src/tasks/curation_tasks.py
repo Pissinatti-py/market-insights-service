@@ -7,6 +7,10 @@ Every collector chains this task, so runs overlap: a Redis single-flight lock
 skips a run while another is draining, and the ``(item_type, item_id)`` unique
 constraint is tolerated per item (skip, not crash) so a lost race never kills
 the batch or duplicates LLM work for long.
+Each run curates one batch and queues the next while backlog remains, so a run
+skipped on the lock rarely loses anything: the holder re-checks the backlog after
+its batch. Only a trigger landing in the instant between that check and the lock
+release is missed, and those items wait for the next chained/scheduled run.
 Items whose output never validates get a ``failed`` dead-letter row instead of
 being re-selected forever; ``recurate_all`` is their retry path.
 Past approve/reject decisions are loaded once per run and passed to the agent as
@@ -177,6 +181,43 @@ def _store(session, row: Curation) -> bool:
         return False
 
 
+def _curate_page(session, page, profile: dict, feedback: list[dict]) -> tuple[int, int]:
+    """Curate one page of items; returns ``(curated, failed)``."""
+    curated = 0
+    failed = 0
+    for item_type, item in page:
+        try:
+            result, raw = _curate_one(item_type, item, profile, feedback)
+        except CollectorTerminal as exc:
+            logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
+            # Dead-letter: the unique constraint keeps the item out of future
+            # selections; recurate_all re-processes it after prompt fixes.
+            dead_letter = Curation(
+                item_type=item_type,
+                item_id=item.id,
+                status=CurationStatus.FAILED,
+                model=settings.OLLAMA_MODEL,
+                raw_llm_output={"error": str(exc)},
+            )
+            if _store(session, dead_letter):
+                failed += 1
+            continue
+
+        row = Curation(
+            item_type=item_type,
+            item_id=item.id,
+            summary=result.summary,
+            tags=result.tags,
+            importance_score=result.importance_score,
+            status=CurationStatus.PENDING,
+            model=settings.OLLAMA_MODEL,
+            raw_llm_output=raw,
+        )
+        if _store(session, row):
+            curated += 1
+    return curated, failed
+
+
 @celery_app.task(
     bind=True,
     name="src.tasks.curation_tasks.curate_uncurated",
@@ -186,11 +227,13 @@ def _store(session, row: Curation) -> bool:
 )
 def curate_uncurated(self) -> dict:
     """
-    Drain the uncurated backlog, capped at ``CURATION_BATCH_SIZE`` items per run
-    (safety cap — the rest waits for the next run). Types are interleaved
-    round-robin so articles cannot starve repos/releases. Single-flight: if
-    another run is already draining, this one skips (the backlog waits for the
-    next scheduled/chained fire).
+    Curate one batch of ``CURATION_BATCH_SIZE`` uncurated items, newest first, then
+    queue the next batch as a **new task** while any backlog is left. Each task stays
+    short — under the lock TTL and the broker's ack-late visibility timeout, and it
+    re-reads profile + feedback — instead of one run looping for hours. Types are
+    interleaved round-robin so articles cannot starve repos/releases. Single-flight:
+    if another run holds the lock this one skips; the holder re-checks the backlog
+    after its batch, so items that landed meanwhile are queued, not stranded.
 
     :return: ``{"curated": int, "failed": int}`` (failed = dead-lettered invalid
         output), or ``{"skipped": "already running"}``.
@@ -201,44 +244,15 @@ def curate_uncurated(self) -> dict:
         logger.info("curate_uncurated: another run holds the lock, skipping")
         return {"skipped": "already running"}
 
-    curated = 0
-    failed = 0
-
     try:
         with SyncSession() as session:
             profile = _load_profile(session)
             feedback = _load_feedback(session)
-
-            for item_type, item in _next_batch(session, settings.CURATION_BATCH_SIZE):
-                try:
-                    result, raw = _curate_one(item_type, item, profile, feedback)
-                except CollectorTerminal as exc:
-                    logger.warning(f"curate: invalid output for {item_type.value}:{item.id}: {exc}")
-                    # Dead-letter: the unique constraint keeps the item out of future
-                    # selections; recurate_all re-processes it after prompt fixes.
-                    dead_letter = Curation(
-                        item_type=item_type,
-                        item_id=item.id,
-                        status=CurationStatus.FAILED,
-                        model=settings.OLLAMA_MODEL,
-                        raw_llm_output={"error": str(exc)},
-                    )
-                    if _store(session, dead_letter):
-                        failed += 1
-                    continue
-
-                row = Curation(
-                    item_type=item_type,
-                    item_id=item.id,
-                    summary=result.summary,
-                    tags=result.tags,
-                    importance_score=result.importance_score,
-                    status=CurationStatus.PENDING,
-                    model=settings.OLLAMA_MODEL,
-                    raw_llm_output=raw,
-                )
-                if _store(session, row):
-                    curated += 1
+            batch = _next_batch(session, settings.CURATION_BATCH_SIZE)
+            curated, failed = _curate_page(session, batch, profile, feedback)
+            # No progress means every insert lost (a concurrent unlocked run owns them,
+            # or they can never store) — stop rather than requeue forever.
+            more = bool(curated + failed) and bool(_next_batch(session, 1))
     finally:
         if lock:
             try:
@@ -246,7 +260,9 @@ def curate_uncurated(self) -> dict:
             except RedisError:
                 pass  # lock expired mid-run; _store already tolerated any overlap
 
-    logger.info(f"curate_uncurated: curated {curated}, failed {failed}")
+    logger.info(f"curate_uncurated: curated {curated}, failed {failed}, more backlog: {more}")
+    if more:
+        celery_app.send_task("src.tasks.curation_tasks.curate_uncurated")
     return {"curated": curated, "failed": failed}
 
 
