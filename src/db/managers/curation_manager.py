@@ -4,6 +4,7 @@ from sqlalchemy import case, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import Session
 
+from src.core.conf import settings
 from src.db.managers.base_manager import BaseManager
 from src.models.curation import Curation, CurationStatus
 
@@ -20,8 +21,8 @@ def reviewed_examples_sync(session: Session) -> list[tuple[uuid.UUID, list[float
     Every human verdict with an embedding — the training set of the importance ranker.
 
     Runs on the **sync** engine because ranking happens inside Celery tasks. Only
-    approved/rejected rows carry a verdict; rows reviewed before they had an
-    embedding join once ``rerank_all`` backfills them.
+    approved/rejected rows carry a verdict. Only the configured embedding model
+    participates; untagged or outdated vectors join once ``rerank_all`` backfills them.
 
     :param session: Active sync session.
     :type session: Session
@@ -29,10 +30,13 @@ def reviewed_examples_sync(session: Session) -> list[tuple[uuid.UUID, list[float
     :rtype: list[tuple[uuid.UUID, list[float], bool]]
     """
     rows = session.execute(
-        select(Curation.item_id, Curation.embedding, Curation.status).where(
+        select(Curation.item_id, Curation.embedding, Curation.status)
+        .where(
             Curation.status.in_([CurationStatus.APPROVED, CurationStatus.REJECTED]),
             Curation.embedding.is_not(None),
+            Curation.embedding_model == settings.OLLAMA_EMBED_MODEL,
         )
+        .order_by(Curation.id)
     )
     return [(item_id, embedding, status == CurationStatus.APPROVED) for item_id, embedding, status in rows]
 

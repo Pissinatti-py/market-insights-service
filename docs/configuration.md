@@ -50,9 +50,9 @@ are dropped.
 | Var | Default | Notes |
 |---|---|---|
 | `OLLAMA_BASE_URL` | `http://host.docker.internal:11434` | A host-side daemon reached from the container. Point at any OpenAI-compatible `/api/chat` to swap providers. |
-| `OLLAMA_MODEL` | `qwen3:14b-q8_0` | Also stamped onto each curation row. |
+| `OLLAMA_MODEL` | `qwen3:14b` | Q4 default, also stamped onto each curation row. Chat uses an 8192-token context, at most 256 output tokens, and thinking disabled. |
 | `OLLAMA_REQUEST_TIMEOUT_SECONDS` | `120.0` | |
-| `OLLAMA_EMBED_MODEL` | `bge-m3` | Embedding model behind the importance ranker — `ollama pull bge-m3` on the daemon host. Changing it mixes vector spaces: `UPDATE mi__curation SET embedding = NULL`, then trigger `rerank_all`. |
+| `OLLAMA_EMBED_MODEL` | `qwen3-embedding:0.6b` | Embedding model behind the importance ranker. Install it on the Ollama host. `rerank_all` automatically replaces missing, untagged, or other-model vectors; reviews use only vectors tagged with the configured model. No manual SQL reset is needed. If weights change under the same tag, clear their provenance before reranking. |
 | `CURATION_BATCH_SIZE` | `50` | Items curated per `curate_uncurated` run (round-robin across types). A run that leaves backlog queues the next one. |
 | `ARTICLE_MAX_CHARS` | `6000` | Truncation cap for full article bodies fetched at curation time. |
 | `ARTICLE_MAX_AGE_DAYS` | `14` | Articles older than this never enter the pipeline. |

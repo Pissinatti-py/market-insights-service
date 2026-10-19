@@ -87,3 +87,11 @@ def test_curate_unavailable_is_retriable():
     respx.post(_OLLAMA).mock(side_effect=httpx.ConnectError("refused"))
     with pytest.raises(CollectorRetriable):
         curation_agent.curate("item", {})
+
+
+@respx.mock
+@pytest.mark.parametrize("body", ["not-json", "null", "[]", '{"message": null}', '{"message": {"content": []}}'])
+def test_malformed_transport_envelope_is_retriable(body):
+    respx.post(_OLLAMA).mock(return_value=httpx.Response(200, text=body))
+    with pytest.raises(CollectorRetriable):
+        curation_agent.curate("item", {})

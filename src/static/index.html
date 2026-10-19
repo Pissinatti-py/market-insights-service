@@ -207,7 +207,7 @@ function gauge(score) {
   const filled = Math.round((score ?? 0) * 10);
   const on = "▮".repeat(filled), off = "▮".repeat(10 - filled);
   return `<span class="bar" aria-hidden="true">${on}<span class="off">${off}</span></span>` +
-         `<span class="val">${(score ?? 0).toFixed(2)}</span>`;
+         `<span class="val">${(score ?? 0).toFixed(3)}</span>`;
 }
 
 function toast(msg) {

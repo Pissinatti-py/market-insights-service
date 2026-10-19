@@ -4,7 +4,9 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from src.core.conf import settings
 from src.core.exceptions import CollectorRetriable, CollectorTerminal
+from src.db.managers.curation_manager import reviewed_examples_sync
 from src.db.session import SyncSession
 from src.models.article import Article, ArticleSource
 from src.models.curation import Curation, CurationItemType, CurationStatus
@@ -224,6 +226,7 @@ def _seed_reviewed(session, title: str, status: CurationStatus, embedding: list[
         reviewed_at=datetime.now(timezone.utc),
         model="old-model",
         embedding=embedding,
+        embedding_model=settings.OLLAMA_EMBED_MODEL if embedding is not None else None,
     )
     session.add(row)
     session.commit()
@@ -253,12 +256,13 @@ def test_new_items_are_scored_by_their_reviewed_neighbours(db_session, monkeypat
     monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
     assert curation_tasks.curate_uncurated.apply().get() == {"curated": 2, "failed": 0}
 
-    assert _score_of("keep-fresh") == 1.0  # all its nearest reviewed neighbours were approved
-    assert _score_of("drop-fresh") == 0.0
+    assert _score_of("keep-fresh") == pytest.approx(0.833)
+    assert _score_of("drop-fresh") == pytest.approx(0.167)
     with SyncSession() as session:
         fresh = session.query(Article).filter(Article.title == "keep-fresh").one()
         stored = session.query(Curation).filter(Curation.item_id == fresh.id).one()
         assert stored.embedding == _KEEP  # kept for rerank_all and as a future example
+        assert stored.embedding_model == settings.OLLAMA_EMBED_MODEL
 
 
 def test_pending_rows_are_not_examples(db_session, monkeypatch):
@@ -285,7 +289,7 @@ def test_rerank_never_scores_an_item_against_its_own_verdict(db_session):
 
     curation_tasks.rerank_all.apply().get()
     # Its own approval would pull it up; its other KEEP-side neighbours were all rejected.
-    assert _score_of("keep-self") == 0.0
+    assert _score_of("keep-self") == pytest.approx(0.167)
 
 
 def test_rerank_backfills_missing_embeddings_and_rescores(db_session):
@@ -306,10 +310,45 @@ def test_rerank_backfills_missing_embeddings_and_rescores(db_session):
         session.commit()
 
     assert curation_tasks.rerank_all.apply().get() == {"embedded": 5, "reranked": 5, "changed": 5}
-    assert _score_of("keep-pending") == 1.0
+    assert _score_of("keep-pending") == pytest.approx(0.833)
     with SyncSession() as session:
         dead_row = session.query(Curation).filter(Curation.status == CurationStatus.FAILED).one()
         assert dead_row.embedding is None and dead_row.importance_score is None  # dead letters stay unscored
+
+
+@pytest.mark.parametrize("previous_model", [None, "another-1024-dimensional-model"])
+def test_rerank_replaces_untagged_or_other_model_vectors(db_session, previous_model):
+    with SyncSession() as session:
+        _seed_verdicts(session)
+        row = _seed_reviewed(session, "keep-migrated", CurationStatus.APPROVED, _DROP)
+        row.embedding_model = previous_model
+        row_id = row.id
+        reviewed_at = row.reviewed_at
+        session.commit()
+        # Equal dimensions do not make vectors from different models compatible.
+        assert len(reviewed_examples_sync(session)) == 4
+
+    result = curation_tasks.rerank_all.apply().get()
+    assert result["embedded"] == 1
+    with SyncSession() as session:
+        row = session.get(Curation, row_id)
+        assert row.embedding == _KEEP
+        assert row.embedding_model == settings.OLLAMA_EMBED_MODEL
+        assert row.status == CurationStatus.APPROVED and row.reviewed_at == reviewed_at
+        assert row.summary == "summary of keep-migrated"
+        assert len(reviewed_examples_sync(session)) == 5
+
+
+def test_new_items_ignore_review_vectors_from_another_model(db_session, monkeypatch):
+    with SyncSession() as session:
+        _seed_verdicts(session)
+        for row in session.query(Curation):
+            row.embedding_model = "old-model"
+        _seed_article(session, "keep-fresh")
+        session.commit()
+    monkeypatch.setattr(curation_tasks.curation_agent, "curate", _ok_curate)
+    curation_tasks.curate_uncurated.apply().get()
+    assert _score_of("keep-fresh") == pytest.approx(0.6)
 
 
 def test_rerank_rewrites_only_scores_that_moved(db_session):
@@ -475,4 +514,8 @@ def test_decisions_made_mid_drain_reach_later_runs(db_session, monkeypatch, requ
     _drain(requeued)
 
     # Batch 1 had no verdicts yet (profile similarity); batch 2 is ranked by them.
-    assert [_score_of(t) for t in ("keep-a3", "keep-a2", "keep-a1")] == [pytest.approx(0.6), pytest.approx(0.6), 1.0]
+    assert [_score_of(t) for t in ("keep-a3", "keep-a2", "keep-a1")] == [
+        pytest.approx(0.6),
+        pytest.approx(0.6),
+        pytest.approx(0.833),
+    ]

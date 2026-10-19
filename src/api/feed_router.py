@@ -121,7 +121,7 @@ async def feed(
         per_page=per_page,
         filters=filters,
         expressions=expressions,
-        order_by=f"{order_by},-created_at",  # ranker scores tie often (1.000) — newest wins
+        order_by=f"{order_by},-created_at",  # newest wins ties at the stored score precision
     )
     items = _to_feed_items(result.items, await _render_items(db, result.items))
     return Page.from_result(result, items=items)

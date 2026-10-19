@@ -1,8 +1,9 @@
 """
 Deterministic curation enrichment.
 
-Before the LLM scores an **article**, fetch the full body (``article_reader``)
-so scoring uses the whole piece, not the feed excerpt. Repos and library
+Before the LLM summarizes an **article**, fetch the full body (``article_reader``)
+so the description uses the whole piece, not the feed excerpt. Numeric ranking
+uses the stored source excerpt independently. Repos and library
 releases carry their evidence (stars, velocity, dates, notes) in the rendered
 item text itself — no extra context block.
 

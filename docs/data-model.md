@@ -76,6 +76,7 @@ points into one of the three source tables — there is deliberately no DB-level
 | `tags` | JSONB list | Short lowercase technology/topic tags. |
 | `importance_score` | Numeric(4,3) | 0–1 rank from the local ranker (indexed — list default sort): the similarity-weighted share of the item's nearest reviewed items that were approved; profile similarity until both verdicts have ≥2 examples. Never the LLM's. |
 | `embedding` | REAL[] | Unit vector of the rendered item from `OLLAMA_EMBED_MODEL` (deferred load). Null for `failed` rows and until `rerank_all` backfills. |
+| `embedding_model` | varchar(128) | Model tag that produced the vector. Missing or other-model vectors are re-embedded before ranking; equal vector dimensions do not imply compatible models. |
 | `status` | enum | `pending \| approved \| rejected` (manual review). |
 | `reviewed_by` | text | Who reviewed it. |
 | `reviewed_at` | timestamptz | When a human approved/rejected it (indexed; null while pending). Not `updated_at` — `recurate_all` bumps that while preserving the decision. |

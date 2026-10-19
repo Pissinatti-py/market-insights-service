@@ -64,6 +64,8 @@ class Curation(TimestampMixin, Base):
     # Unit vector of the rendered item from OLLAMA_EMBED_MODEL — what the ranker scores
     # importance_score from. Deferred: ~4 KB a row that no API response ever needs.
     embedding: Mapped[list[float] | None] = mapped_column(ARRAY(REAL), nullable=True, deferred=True)
+    # Dimensions alone cannot identify a vector space: bge-m3 and Qwen both use 1024.
+    embedding_model: Mapped[str | None] = mapped_column(String(128), nullable=True)
 
     status: Mapped[CurationStatus] = mapped_column(
         SAEnum(CurationStatus, name="curation_status_enum", values_callable=lambda obj: [e.value for e in obj]),

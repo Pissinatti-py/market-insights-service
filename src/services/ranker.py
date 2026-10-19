@@ -4,19 +4,20 @@ Importance ranking — a local decision model learned from review verdicts.
 The LLM only describes an item (summary/tags); this module decides how high it
 ranks. Each item is embedded with a local Ollama embedding model (``/api/embed``
 returns unit-length vectors, so cosine is a plain dot product) and scored by its
-nearest **reviewed** neighbours: the similarity-weighted share of the ``_K``
-closest approved/rejected items that were approved. Measured leave-one-out on
-the first 81 real reviews it separates approved from rejected far better than
-the LLM's own score did (AUC 0.70 vs 0.41), at a fraction of the cost — and
-re-ranking after new reviews needs no LLM call at all (``rerank_all``).
+nearest **reviewed** neighbours: a smoothed, similarity-weighted approval estimate
+over the ``_K`` closest approved/rejected items. A neutral Beta(0.5, 0.5) prior
+prevents a handful of unanimous, weakly similar reviews from implying certainty.
+Re-ranking after new reviews needs no generation call (``rerank_all``).
+Model comparisons and their dataset-dependent limitations are documented in
+``docs/curation-model-review.md``.
 
 Two invariants carried over from the old few-shot feedback loop:
 
 - **Both sides or nothing.** Under ``_MIN_PER_SIDE`` approved *or* rejected
   examples there is no contrast to learn from (a wall of approvals would just
   push every score up), so the score falls back to similarity with the profile.
-  Judged on the whole reference set, not per item, so one run never mixes the
-  two scales.
+  The target's own label is excluded before checking class support as well as
+  before voting, including at the cold-start boundary.
 - **Never its own verdict.** An item is never scored against its own review —
   otherwise every reviewed item would rank itself and
   ``GET /api/curation/calibration`` would report a self-fulfilling separation.
@@ -39,6 +40,9 @@ _K = 10
 
 #: Minimum reviewed examples on *each* side before the neighbours are trusted.
 _MIN_PER_SIDE = 2
+
+#: One neutral observation (half approved, half rejected), in similarity-weight units.
+_PRIOR_WEIGHT = 1.0
 
 #: Characters of the rendered item that get embedded — the head carries title and lead.
 EMBED_CHARS = 2000
@@ -64,23 +68,42 @@ def embed(texts: list[str]) -> list[list[float]]:
         body without one embedding per text.
     """
     vectors: list[list[float]] = []
-    for start in range(0, len(texts), EMBED_BATCH):
-        vectors += _embed_batch(texts[start : start + EMBED_BATCH])
+    if not texts:
+        return vectors
+    with httpx.Client(timeout=settings.OLLAMA_REQUEST_TIMEOUT_SECONDS) as client:
+        for start in range(0, len(texts), EMBED_BATCH):
+            batch = _embed_batch(texts[start : start + EMBED_BATCH], client)
+            if vectors and len(batch[0]) != len(vectors[0]):
+                raise CollectorRetriable("ollama embed: vector dimensions changed between batches")
+            vectors.extend(batch)
     return vectors
 
 
-def _embed_batch(texts: list[str]) -> list[list[float]]:
+def _embed_batch(texts: list[str], client: httpx.Client) -> list[list[float]]:
     payload = {"model": settings.OLLAMA_EMBED_MODEL, "input": texts}
     try:
-        with httpx.Client(timeout=settings.OLLAMA_REQUEST_TIMEOUT_SECONDS) as client:
-            resp = client.post(f"{settings.OLLAMA_BASE_URL}/api/embed", json=payload)
-            resp.raise_for_status()
-            vectors = resp.json()["embeddings"]
+        resp = client.post(f"{settings.OLLAMA_BASE_URL}/api/embed", json=payload)
+        resp.raise_for_status()
+        vectors = resp.json()["embeddings"]
     except (httpx.RequestError, httpx.HTTPStatusError, ValueError, KeyError, TypeError) as exc:
         raise CollectorRetriable(f"ollama embed: {type(exc).__name__}: {exc}") from exc
-    if len(vectors) != len(texts):
-        raise CollectorRetriable(f"ollama embed: {len(vectors)} embeddings for {len(texts)} texts")
-    return vectors
+    if not isinstance(vectors, list) or len(vectors) != len(texts):
+        raise CollectorRetriable("ollama embed: expected one vector per input text")
+    normalized = []
+    dimensions = None
+    for vector in vectors:
+        if not isinstance(vector, list) or not vector:
+            raise CollectorRetriable("ollama embed: expected a non-empty numeric vector")
+        if dimensions is not None and len(vector) != dimensions:
+            raise CollectorRetriable("ollama embed: inconsistent vector dimensions")
+        dimensions = len(vector)
+        if any(type(value) not in (int, float) or not math.isfinite(value) for value in vector):
+            raise CollectorRetriable("ollama embed: vector contains non-finite or non-numeric values")
+        norm = math.hypot(*vector)
+        if not math.isfinite(norm) or norm == 0:
+            raise CollectorRetriable("ollama embed: vector has an invalid norm")
+        normalized.append([value / norm for value in vector])
+    return normalized
 
 
 def _dot(a: list[float], b: list[float]) -> float:
@@ -89,7 +112,7 @@ def _dot(a: list[float], b: list[float]) -> float:
 
 def score(vec: list[float], examples: list[Example], profile_vec: list[float], item_id: uuid.UUID) -> float:
     """
-    Importance of one item, 0–1: how much its nearest reviewed neighbours were approved.
+    Estimate affinity from reviewed neighbours, with uncertainty shrinkage.
 
     :param vec: The item's unit embedding.
     :type vec: list[float]
@@ -99,19 +122,20 @@ def score(vec: list[float], examples: list[Example], profile_vec: list[float], i
     :type profile_vec: list[float]
     :param item_id: The item being scored; its own review is left out.
     :type item_id: uuid.UUID
-    :return: Similarity-weighted share of approved neighbours, or the clamped profile
-        similarity while either side has fewer than ``_MIN_PER_SIDE`` examples.
+    :return: Smoothed affinity estimate, or the clamped profile similarity while
+        either side has fewer than ``_MIN_PER_SIDE`` examples. This is a ranking
+        signal, not a calibrated probability of editorial importance.
     :rtype: float
     """
-    approvals = sum(approved for _, _, approved in examples)
-    if min(approvals, len(examples) - approvals) < _MIN_PER_SIDE:
-        return min(max(_dot(vec, profile_vec), 0.0), 1.0)
-
     pool = [(example_vec, approved) for example_id, example_vec, approved in examples if example_id != item_id]
+    approvals = sum(approved for _, approved in pool)
+    if min(approvals, len(pool) - approvals) < _MIN_PER_SIDE:
+        return min(max(_dot(vec, profile_vec), 0.0), 1.0)
 
     # ponytail: pure-Python O(items × reviews) dot products; numpy/pgvector once reviews reach thousands
     nearest = heapq.nlargest(_K, ((_dot(vec, v), approved) for v, approved in pool), key=operator.itemgetter(0))
     weight = sum(max(sim, 0.0) for sim, _ in nearest)
-    if not weight:  # every neighbour points away — fall back to a plain vote
-        return sum(approved for _, approved in nearest) / len(nearest)
-    return sum(max(sim, 0.0) for sim, approved in nearest if approved) / weight
+    positive = sum(max(sim, 0.0) for sim, approved in nearest if approved)
+    # Fractional observations: closer evidence moves the estimate further from
+    # neutral. No positive similarity means no evidence, regardless of the labels.
+    return (positive + _PRIOR_WEIGHT / 2) / (weight + _PRIOR_WEIGHT)

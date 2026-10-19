@@ -205,6 +205,7 @@ def _curate_page(
             tags=result.tags,
             importance_score=ranker.score(vec, examples, profile_vec, item.id),
             embedding=vec,
+            embedding_model=settings.OLLAMA_EMBED_MODEL,
             status=CurationStatus.PENDING,
             model=settings.OLLAMA_MODEL,
             raw_llm_output=raw,
@@ -335,9 +336,9 @@ def rerank_all(self) -> dict:
     """
     Re-score **every** curated item with the ranker — no LLM call.
 
-    First backfills missing embeddings (rows curated before the ranker existed,
-    ``failed`` rows revived by ``recurate_all``, or all of them after the embedding
-    model changed and the column was cleared). Then recomputes ``importance_score``
+    First backfills missing, untagged, or outdated embeddings (rows curated before
+    the ranker existed, revived ``failed`` rows, or rows from another model).
+    Only embeddings from the configured model participate. Then recomputes ``importance_score``
     for every embedded row against the current review verdicts — each item never
     against its own. Cheap enough to run on a schedule, so new reviews reorder the
     feed without re-curating anything.
@@ -363,7 +364,9 @@ def rerank_all(self) -> dict:
         with SyncSession() as session:
             missing = session.execute(
                 select(Curation.id, Curation.item_type, Curation.item_id).where(
-                    Curation.embedding.is_(None), Curation.status != CurationStatus.FAILED
+                    Curation.status != CurationStatus.FAILED,
+                    Curation.embedding.is_(None)
+                    | Curation.embedding_model.is_distinct_from(settings.OLLAMA_EMBED_MODEL),
                 )
             ).all()
             for start in range(0, len(missing), ranker.EMBED_BATCH):
@@ -377,7 +380,10 @@ def rerank_all(self) -> dict:
                     vectors = ranker.embed([text for _, text in found])
                     session.execute(
                         update(Curation),
-                        [{"id": row_id, "embedding": vec} for (row_id, _), vec in zip(found, vectors, strict=True)],
+                        [
+                            {"id": row_id, "embedding": vec, "embedding_model": settings.OLLAMA_EMBED_MODEL}
+                            for (row_id, _), vec in zip(found, vectors, strict=True)
+                        ],
                     )
                     embedded += len(found)
                 session.commit()
@@ -386,7 +392,11 @@ def rerank_all(self) -> dict:
             examples, profile_vec = _load_ranking(session, _load_profile(session))
             query = (
                 select(Curation.id, Curation.item_id, Curation.embedding, Curation.importance_score)
-                .where(Curation.embedding.is_not(None))
+                .where(
+                    Curation.embedding.is_not(None),
+                    Curation.embedding_model == settings.OLLAMA_EMBED_MODEL,
+                    Curation.status != CurationStatus.FAILED,
+                )
                 .order_by(Curation.id)
                 .limit(_RERANK_CHUNK)
             )
