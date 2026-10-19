@@ -15,6 +15,8 @@ them with a local LLM against a configurable technical profile.
 | [data-model.md](data-model.md) | Every table, its columns, and the dedup/soft-delete conventions |
 | [configuration.md](configuration.md) | Env vars (`src/core/conf.py`) vs. runtime preferences (DB) |
 | [operations.md](operations.md) | Running locally, triggering tasks by hand, migrations, testing |
+| [curation-evaluation.md](curation-evaluation.md) | Score saturation diagnosis, model comparisons, measurements, and limitations |
+| [curation-model-review.md](curation-model-review.md) | Follow-up validation, local model selection, and the factual prompt |
 
 ## The one-paragraph version
 

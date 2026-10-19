@@ -1,0 +1,90 @@
+{
+  "baseline/qwen3:14b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 1.2812230624999756,
+    "p95_seconds": 1.773315626999647,
+    "tag_checks_passed": 33,
+    "schema_errors": 0
+  },
+  "baseline/qwen3.5:4b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 1.5828165570001147,
+    "p95_seconds": 2.2268409230000543,
+    "tag_checks_passed": 32,
+    "schema_errors": 0
+  },
+  "baseline/qwen3.5:9b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 1.253090770500421,
+    "p95_seconds": 1.644995253000161,
+    "tag_checks_passed": 31,
+    "schema_errors": 0
+  },
+  "baseline/qwen3-vl:8b-instruct": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 0.7554422000002887,
+    "p95_seconds": 1.0710904990000927,
+    "tag_checks_passed": 35,
+    "schema_errors": 0
+  },
+  "concise/qwen3:14b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 1.1177094355002737,
+    "p95_seconds": 1.5232195540002067,
+    "tag_checks_passed": 36,
+    "schema_errors": 0
+  },
+  "concise/qwen3.5:9b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 1.0170738529996015,
+    "p95_seconds": 1.386662243000501,
+    "tag_checks_passed": 34,
+    "schema_errors": 0
+  },
+  "concise/qwen3-vl:8b-instruct": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 0.6787141559998418,
+    "p95_seconds": 0.887673406000431,
+    "tag_checks_passed": 33,
+    "schema_errors": 0
+  },
+  "concise_8b/qwen3:8b": {
+    "requests": 36,
+    "independent_cases": 12,
+    "median_seconds": 0.6395602984998732,
+    "p95_seconds": 0.8986865839997336,
+    "tag_checks_passed": 36,
+    "schema_errors": 0
+  },
+  "holdout_baseline/qwen3:14b": {
+    "requests": 24,
+    "independent_cases": 8,
+    "median_seconds": 1.4614821799996207,
+    "p95_seconds": 3.5330873240000074,
+    "tag_checks_passed": 24,
+    "schema_errors": 0
+  },
+  "holdout_concise_14b/qwen3:14b": {
+    "requests": 24,
+    "independent_cases": 8,
+    "median_seconds": 1.1269182115001968,
+    "p95_seconds": 1.7850475229997755,
+    "tag_checks_passed": 24,
+    "schema_errors": 0
+  },
+  "holdout_concise_8b/qwen3:8b": {
+    "requests": 24,
+    "independent_cases": 8,
+    "median_seconds": 0.6702006674995573,
+    "p95_seconds": 0.9480999130000782,
+    "tag_checks_passed": 21,
+    "schema_errors": 0
+  }
+}

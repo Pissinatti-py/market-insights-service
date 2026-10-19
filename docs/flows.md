@@ -129,9 +129,10 @@ Returns `{"curated": N, "failed": M}` (failed = dead-lettered invalid output).
 
 Re-scores the whole feed against the latest review verdicts — **no LLM call**:
 
-1. Backfill: embed every non-`failed` curation row whose `embedding` is NULL (rows
+1. Backfill: embed every non-`failed` curation row whose `embedding` is NULL or whose
+   `embedding_model` is missing or differs from the configured model (rows
    curated before the ranker, `failed` rows revived by `recurate_all`, or everything
-   after `OLLAMA_EMBED_MODEL` changed and the column was cleared) — 32 per `/api/embed`.
+   after `OLLAMA_EMBED_MODEL` changed) — 32 per `/api/embed`. No manual reset is needed.
 2. Load the reference set (all embedded verdicts + the embedded profile).
 3. Walk every embedded row in primary-key order, 500 per chunk (keyset, `id > last`):
    score the chunk with no locks held, UPDATE only the rows whose score moved at the
@@ -171,19 +172,35 @@ its curation, it just drops out of the default feed.
 
 Approve/reject is not only bookkeeping: it is the training signal for the next run.
 
-**Into the score.** Your verdicts *are* the ranking model. `importance_score` is the
-similarity-weighted share of an item's 10 nearest **reviewed** items (in `bge-m3`
-embedding space) that you approved — a local kNN decision model, `src/services/ranker.py`.
-Measured leave-one-out on the first 81 reviews it reached AUC 0.70, where the LLM's own
-score was 0.41 (worse than a coin flip). New items are scored at curation time;
-`rerank_all` re-scores everything every 30 minutes. Two guards:
+**Into the score.** Your verdicts *are* the ranking model. `importance_score` is a
+smoothed estimate from an item's 10 nearest **reviewed** items in the configured
+embedding space — a local kNN decision model, `src/services/ranker.py`. With
+`positive` the sum of positive similarities to approved neighbours and `weight`
+the same sum over all neighbours, the estimate is `(positive + 0.5) / (weight + 1)`.
+The neutral Beta(0.5, 0.5) prior prevents sparse, unanimous reviews from producing
+certainty, differentiates unanimity by evidence strength, and returns 0.5 when no
+neighbour has positive similarity. It is an affinity ranking signal, not a
+calibrated probability of quality or novelty. The UI displays all three stored
+decimal places; natural ties can still occur.
+
+On 82 reviews, the old unsmoothed `bge-m3` ranker had leave-one-out AUC 0.694 and
+Brier error 0.206; smoothed `qwen3-embedding:0.6b` reached 0.711 and 0.201.
+These are exploratory results on a small, selected review set. See
+[the evaluation report](curation-evaluation.md) for limitations and reproduction.
+[Follow-up validation](curation-model-review.md) on 84 reviews compared four embedding
+models and retained Qwen: faster alternatives did not consistently improve precision.
+New items are scored at curation time; `rerank_all` re-scores everything every
+30 minutes. Three guards:
 
 - **Both sides or nothing.** Under 2 approved *or* under 2 rejected, the neighbours are
   ignored and the score is the similarity to your profile — one-sided verdicts have no
-  contrast and would just push every score up. It is judged on the whole reference set,
-  so every item in a run is on the same scale.
+  contrast and would just push every score up. The item's own label is excluded before
+  checking class support, including at the cold-start boundary.
 - **No self-reference.** An item is never scored against its own verdict, or every
   reviewed item would rank itself and make the calibration report below meaningless.
+- **One vector space.** Only examples and candidate embeddings whose `embedding_model`
+  matches the configured model participate. A model change backfills vectors before
+  scoring, even when the old and new models have the same dimensionality.
 
 **Into the score's credibility.** `GET /api/curation/calibration` reports how the
 model's scores line up with your verdicts: mean score of approved vs. rejected, the

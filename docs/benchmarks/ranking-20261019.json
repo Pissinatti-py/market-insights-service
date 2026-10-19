@@ -1,0 +1,26 @@
+{
+  "reviewed": 82,
+  "approved": 52,
+  "embed_batch_size": 32,
+  "dataset_sha256": "e0adad6078f4ffcb461e932ab09f28ff9a41f3389484ad361694e6b67a1cc5fc",
+  "models": {
+    "bge-m3": {
+      "auc": 0.6916666666666667,
+      "brier": 0.20633384911736968,
+      "embedding_seconds_including_load": 21.250042269000005,
+      "score_min": 0.24099517362795955,
+      "score_max": 0.9276004596235724,
+      "scores_at_one": 0,
+      "distinct_scores_at_db_precision": 62
+    },
+    "qwen3-embedding:0.6b": {
+      "auc": 0.7333333333333333,
+      "brier": 0.19516069686058823,
+      "embedding_seconds_including_load": 19.908875763000196,
+      "score_min": 0.31543869960098436,
+      "score_max": 0.86440153386664,
+      "scores_at_one": 0,
+      "distinct_scores_at_db_precision": 70
+    }
+  }
+}
